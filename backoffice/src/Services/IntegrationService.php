@@ -56,6 +56,7 @@ class IntegrationService
         // 1. Validación estricta de campos obligatorios (Apartado 3.b y 4.b).
         //    Nada se rellena con valores inventados: si falta un obligatorio, se rechaza; los opcionales quedan a NULL.
         $missingFields = [];
+        $eventId = trim((string) ($payload['event_id'] ?? ''));
         $orderRef = trim((string) ($payload['order_ref'] ?? ''));
         $customer = is_array($payload['customer'] ?? null) ? $payload['customer'] : [];
         $customerEmail = trim((string) ($customer['email'] ?? ''));
@@ -67,6 +68,9 @@ class IntegrationService
         $totalAmount = $this->numberOrNull($payload['total_amount'] ?? null);
         $shippingAmount = $this->numberOrNull($payload['shipping_amount'] ?? null);
 
+        if ($eventId === '') {
+            $missingFields[] = 'event_id (identificador único del evento de la tienda)';
+        }
         if ($orderRef === '') {
             $missingFields[] = 'order_ref';
         }
@@ -155,7 +159,13 @@ class IntegrationService
         try {
             $this->db->beginTransaction();
 
-            // 3. Control de Idempotencia por order_ref (Apartado 13 - Rúbrica: idempotencia básica)
+            // 3a. Idempotencia por event_id: un evento ya procesado se responde como «duplicate» sin tocar nada
+            if ($this->isEventProcessed($eventId)) {
+                $this->db->rollBack();
+                return $this->duplicateResponse($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, $eventId, $payload, $startTime);
+            }
+
+            // 3b. Idempotencia por order_ref (Apartado 13 - Rúbrica: idempotencia básica)
             $stmtOrd = $this->db->prepare('SELECT * FROM erp_orders WHERE order_ref = :ref LIMIT 1');
             $stmtOrd->execute([':ref' => $orderRef]);
             $existingOrder = $stmtOrd->fetch();
@@ -220,24 +230,31 @@ class IntegrationService
             }
 
             $isIdempotentUpdate = false;
+            $orderResult = 'created';
             if ($existingOrder) {
+                // Pedido ya integrado: un evento solo puede HACER AVANZAR el estado (tabla de transiciones),
+                // nunca retrocederlo (p. ej. un order.created que llega tarde a un pedido ya enviado),
+                // y el total no se sobrescribe.
                 $isIdempotentUpdate = true;
                 $orderId = (int) $existingOrder['id'];
-                $updOrder = $this->db->prepare('
-                    UPDATE erp_orders
-                    SET payment_status = :payment_status,
-                        order_status = :order_status,
-                        total_amount = :total_amount,
-                        updated_at = :updated_at
-                    WHERE id = :id
-                ');
-                $updOrder->execute([
-                    ':payment_status' => $paymentStatus,
-                    ':order_status'   => $normalizedOrderStatus,
-                    ':total_amount'   => $totalAmount,
-                    ':updated_at'     => date('Y-m-d H:i:s'),
-                    ':id'             => $orderId,
-                ]);
+                $prevStatus = (string) $existingOrder['order_status'];
+                if ($normalizedOrderStatus === $prevStatus) {
+                    $orderResult = 'unchanged';
+                } elseif ($this->isAllowedEventTransition($prevStatus, $normalizedOrderStatus)) {
+                    $orderResult = 'updated';
+                    $this->db->prepare('
+                        UPDATE erp_orders
+                        SET payment_status = :payment_status, order_status = :order_status, updated_at = :updated_at
+                        WHERE id = :id
+                    ')->execute([
+                        ':payment_status' => $paymentStatus,
+                        ':order_status'   => $normalizedOrderStatus,
+                        ':updated_at'     => date('Y-m-d H:i:s'),
+                        ':id'             => $orderId,
+                    ]);
+                } else {
+                    $orderResult = 'ignored';
+                }
             } else {
                 // Calcular desglose de IVA (21% incluido como en Piquantum Tarea 1)
                 $subtotal = round($totalAmount / 1.21, 2);
@@ -328,20 +345,29 @@ class IntegrationService
                 ')->execute([':amount' => $totalAmount, ':id' => $customerId]);
             }
 
+            $this->markEventProcessed($eventId, $eventType, $orderRef);
             $this->db->commit();
 
-            $msg = $isIdempotentUpdate
-                ? "Pedido {$orderRef} ya existía en Back-Office: actualizado de forma idempotente a estado '{$normalizedOrderStatus}'."
-                : "Pedido {$orderRef} creado e integrado en Back-Office con " . count($items) . " líneas y stock descontado.";
+            $currentStatus = $orderResult === 'ignored' || $orderResult === 'unchanged'
+                ? (string) $existingOrder['order_status']
+                : $normalizedOrderStatus;
+            $msg = match ($orderResult) {
+                'created'   => "Pedido {$orderRef} creado e integrado en Back-Office con " . count($items) . " líneas y stock descontado.",
+                'updated'   => "Pedido {$orderRef} ya existía: estado avanzado de '{$existingOrder['order_status']}' a '{$normalizedOrderStatus}' (el total no se modifica).",
+                'unchanged' => "Pedido {$orderRef} ya existía en estado '{$currentStatus}': sin cambios.",
+                default     => "Pedido {$orderRef} ya existía en estado '{$currentStatus}': el evento ('{$normalizedOrderStatus}') no puede hacer retroceder ni saltarse estados; se ignora.",
+            };
 
             $response = [
                 'ok'                => true,
                 'execution_id'      => $executionId,
                 'scenario'          => 'ESCENARIO_1_PEDIDO',
+                'result'            => $orderResult,
                 'idempotent_update' => $isIdempotentUpdate,
+                'event_id'          => $eventId,
                 'order_id'          => $orderId,
                 'order_ref'         => $orderRef,
-                'normalized_status' => $normalizedOrderStatus,
+                'normalized_status' => $currentStatus,
                 'message'           => $msg,
             ];
 
@@ -633,6 +659,12 @@ class IntegrationService
 
         $now = date('Y-m-d H:i:s');
 
+        // Idempotencia por event_id (opcional en incidencias): si se repite, «duplicate» sin tocar nada
+        $eventId = $this->stringOrNull($payload['event_id'] ?? null);
+        if ($eventId !== null && $this->isEventProcessed($eventId)) {
+            return $this->duplicateResponse($executionId, 'ESCENARIO_3_POSTVENTA', $eventType, $direction, $ticketRef, $eventId, $payload, $startTime);
+        }
+
         // Si existe el pedido, marcarlo con alerta o vincularlo
         $stmtCheck = $this->db->prepare('SELECT id FROM erp_tickets WHERE ticket_ref = :ref LIMIT 1');
         $stmtCheck->execute([':ref' => $ticketRef]);
@@ -673,6 +705,10 @@ class IntegrationService
                 ':status'      => 'EN_REVISION_IA',
                 ':created_at'  => $now,
             ]);
+        }
+
+        if ($eventId !== null) {
+            $this->markEventProcessed($eventId, $eventType, $ticketRef);
         }
 
         $msg = "Incidencia {$ticketRef} registrada en Back-Office y vinculada al pedido " . ($orderRef ?? 'SIN_PEDIDO') . " en estado EN_REVISION_IA.";
@@ -1239,6 +1275,51 @@ class IntegrationService
                 'low_stock_alerts' => $lowStockCount,
             ],
         ];
+    }
+
+    /**
+     * ¿Puede un evento de la tienda hacer avanzar el pedido de $from a $to?
+     * Las transiciones del back-office (ORDER_TRANSITIONS) más el cobro en la tienda (creado -> pagado),
+     * que la tienda hace sin pasar por el back-office.
+     */
+    private function isAllowedEventTransition(string $from, string $to): bool
+    {
+        $paymentSteps = [
+            'creado'          => ['pagado_simulado', 'pendiente_preparacion'],
+            'pagado_simulado' => ['pendiente_preparacion'],
+        ];
+        return $this->isAllowedTransition($from, $to) || in_array($to, $paymentSteps[$from] ?? [], true);
+    }
+
+    private function isEventProcessed(string $eventId): bool
+    {
+        $stmt = $this->db->prepare('SELECT 1 FROM erp_processed_events WHERE event_id = :id LIMIT 1');
+        $stmt->execute([':id' => $eventId]);
+        return $stmt->fetchColumn() !== false;
+    }
+
+    private function markEventProcessed(string $eventId, string $eventType, string $entityRef): void
+    {
+        $this->db->prepare('
+            INSERT INTO erp_processed_events (event_id, event_type, entity_ref, processed_at)
+            VALUES (:id, :type, :ref, :at)
+        ')->execute([':id' => $eventId, ':type' => $eventType, ':ref' => $entityRef, ':at' => date('Y-m-d H:i:s')]);
+    }
+
+    /** Respuesta (HTTP 200) para un evento ya procesado: no se vuelve a aplicar y queda constancia en el log. */
+    private function duplicateResponse(string $executionId, string $scenario, string $eventType, string $direction, string $entityRef, string $eventId, array $payload, float $startTime): array
+    {
+        $msg = "Evento {$eventId} ya procesado anteriormente: se ignora (duplicate).";
+        $res = [
+            'ok'           => true,
+            'result'       => 'duplicate',
+            'execution_id' => $executionId,
+            'scenario'     => $scenario,
+            'event_id'     => $eventId,
+            'message'      => $msg,
+        ];
+        $this->logExecution($executionId, $scenario, $eventType, $direction, $entityRef ?: 'N/A', 'DUPLICADO', null, $msg, $payload, $res, $startTime);
+        return $res;
     }
 
     /** ¿Se puede pasar de $from a $to según ORDER_TRANSITIONS? */

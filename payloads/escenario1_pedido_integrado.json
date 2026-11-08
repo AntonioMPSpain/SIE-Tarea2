@@ -1,4 +1,5 @@
 {
+  "event_id": "3f6c2a9e-1b4d-4e7a-9c25-8d0f1e2a7b61",
   "execution_id": "exec_escenario1_pedido_001",
   "event_type": "order.created",
   "order_ref": "PQ-20261108-A901BC",

@@ -109,11 +109,13 @@ check(scalar($db, 'SELECT variant_size FROM erp_order_items WHERE sku = ?', ['SA
 // --- C6: rechazar en lugar de inventar ----------------------------------------------------------------
 $bad = $order;
 $bad['order_ref'] = 'PQ-TEST-SIN-PRECIO';
+$bad['event_id'] = 'evt-pq-test-sin-precio';
 unset($bad['items'][1]['unit_price']);
 $res = $service->processOrderEvent($bad);
 check($res['ok'] === false && $res['error_code'] === 'ERR_CAMPOS_OBLIGATORIOS' && str_contains($res['message'], 'items[1].unit_price'), 'C6: línea sin unit_price → ERR_CAMPOS_OBLIGATORIOS que la nombra', $res['message'] ?? '');
 $bad = $order;
 $bad['order_ref'] = 'PQ-TEST-ESTADO';
+$bad['event_id'] = 'evt-pq-test-estado';
 $bad['status'] = 'estado_inventado';
 $res = $service->processOrderEvent($bad);
 check($res['ok'] === false && str_contains($res['message'], 'status'), 'C6: estado fuera del catálogo → rechazado');
@@ -124,12 +126,14 @@ check($res['ok'] === false, 'Escenario 1: payload incompleto → rama de error',
 $ordersBefore = (int) scalar($db, 'SELECT COUNT(*) FROM erp_orders');
 $bad = $order;
 $bad['order_ref'] = 'PQ-TEST-SKU';
+$bad['event_id'] = 'evt-pq-test-sku';
 $bad['items'][1]['sku'] = 'SAL-999';
 $res = $service->processOrderEvent($bad);
 check($res['ok'] === false && $res['error_code'] === 'ERR_ENTIDAD_NO_ENCONTRADA' && str_contains($res['message'], 'SAL-999'), 'C7: pedido con SAL-999 → ERR_ENTIDAD_NO_ENCONTRADA', $res['message'] ?? '');
 check((int) scalar($db, 'SELECT COUNT(*) FROM erp_orders') === $ordersBefore, 'C7: ... y ninguna fila nueva en erp_orders');
 $bad = $order;
 $bad['order_ref'] = 'PQ-TEST-STOCK';
+$bad['event_id'] = 'evt-pq-test-stock';
 $bad['items'] = [['sku' => 'SAL-001-200ML', 'product_name' => 'Salsa Carolina Reaper Inferno', 'variant_size' => '200 ml', 'quantity' => 50, 'unit_price' => 18.50]];
 $bad['total_amount'] = 929.95;
 $res = $service->processOrderEvent($bad);
@@ -145,6 +149,7 @@ $res = $service->processOperationalChange(payload('escenario2_cambio_operativo')
 check($res['ok'] === true && ($res['unchanged'] ?? false) === true, 'C11: mismo estado → 200 sin cambios', $res['message'] ?? '');
 $cancelOrder = $order;
 $cancelOrder['order_ref'] = 'PQ-TEST-CANCELADO';
+$cancelOrder['event_id'] = 'evt-pq-test-cancelado';
 $cancelOrder['items'] = [['sku' => 'SAL-003', 'product_name' => 'Salsa Verde Jalapeño & Lima', 'variant_size' => null, 'quantity' => 1, 'unit_price' => 5.90]];
 $cancelOrder['total_amount'] = 10.85;
 $service->processOrderEvent($cancelOrder);
@@ -154,12 +159,41 @@ $res = $service->processOperationalChange(['change_type' => 'ORDER_STATUS', 'ord
 check($res['ok'] === false && $res['error_code'] === 'ERR_TRANSICION_ESTADO', 'C11: cancelado → enviado → ERR_TRANSICION_ESTADO', $res['message'] ?? '');
 check(scalar($db, 'SELECT order_status FROM erp_orders WHERE order_ref = ?', ['PQ-TEST-CANCELADO']) === 'cancelado', 'C11: ... y el pedido sigue cancelado');
 
+// --- C12: idempotencia por event_id y sin retroceder estados ---------------------------------------
+$ordersBefore = (int) scalar($db, 'SELECT COUNT(*) FROM erp_orders');
+$res = $service->processOrderEvent($order);
+check($res['ok'] === true && ($res['result'] ?? '') === 'duplicate', 'C12: mismo evento enviado dos veces → la segunda vez «duplicate»', $res['message'] ?? '');
+check((int) scalar($db, 'SELECT COUNT(*) FROM erp_orders') === $ordersBefore, 'C12: ... sin pedidos nuevos');
+$late = $order;
+$late['event_id'] = 'evt-order-created-tardio';
+$late['status'] = 'creado';
+$late['total_amount'] = 999.99;
+$res = $service->processOrderEvent($late);
+check($res['ok'] === true && ($res['result'] ?? '') === 'ignored', 'C12: order.created que llega después de «enviado» → se ignora', $res['message'] ?? '');
+$row = $db->query("SELECT order_status, total_amount FROM erp_orders WHERE order_ref = 'PQ-20261108-A901BC'")->fetch();
+check($row['order_status'] === 'enviado' && abs((float) $row['total_amount'] - 26.85) < 0.001, 'C12: ... el estado no retrocede y el total no se sobrescribe', json_encode($row));
+$noEvent = $order;
+unset($noEvent['event_id']);
+$res = $service->processOrderEvent($noEvent);
+check($res['ok'] === false && str_contains($res['message'], 'event_id'), 'C12: pedido sin event_id → rechazado');
+$created = $order;
+$created['order_ref'] = 'PQ-TEST-AVANZA';
+$created['event_id'] = 'evt-avanza-1';
+$created['status'] = 'creado';
+$service->processOrderEvent($created);
+$paid = $created;
+$paid['event_id'] = 'evt-avanza-2';
+$paid['status'] = 'pagado_simulado';
+$res = $service->processOrderEvent($paid);
+check(($res['result'] ?? '') === 'updated' && scalar($db, 'SELECT order_status FROM erp_orders WHERE order_ref = ?', ['PQ-TEST-AVANZA']) === 'pendiente_preparacion', 'C12: payment.simulated hace avanzar creado → pendiente_preparacion', $res['message'] ?? '');
+
 // --- Escenario 3 y C8: incidencia y chat_id de Telegram -----------------------------------------------
 $ticket = payload('escenario3_incidencia_postventa');
 $res = $service->processSupportTicket($ticket);
 check($res['ok'] === true && $res['telegram_chat_id'] === null, 'C8: incidencia sin telegram_chat_id se crea igualmente', $res['message'] ?? '');
 $badTicket = $ticket;
 $badTicket['ticket_ref'] = 'INC-TEST-ARROBA';
+$badTicket['event_id'] = 'evt-inc-test-arroba';
 $badTicket['telegram_chat_id'] = '@laura_piquantum_test';
 $res = $service->processSupportTicket($badTicket);
 check($res['ok'] === false && str_contains($res['message'], 'telegram_chat_id'), 'C8: telegram_chat_id con @usuario → rechazado');
@@ -167,7 +201,7 @@ check($res['ok'] === false && str_contains($res['message'], 'telegram_chat_id'),
 // --- Tools del agente y propuesta estructurada ------------------------------------------------------
 $toolOrder = $service->getAgentOrderContext('PQ-20261108-A901BC');
 $toolStock = $service->getAgentStockContext('SAL-002-100ML');
-check($toolOrder['found'] === true && $toolStock['found'] === true && $toolStock['stock_available'] === 18, 'Tools del agente: consulta de pedido y de stock');
+check($toolOrder['found'] === true && $toolStock['found'] === true && $toolStock['stock_available'] === (int) scalar($db, 'SELECT stock_available FROM erp_inventory WHERE sku = ?', ['SAL-002-100ML']), 'Tools del agente: consulta de pedido y de stock');
 $proposal = payload('escenario3_salida_estructurada_agente_ia');
 $incomplete = $proposal;
 unset($incomplete['mensaje_propuesto_telegram']);
@@ -186,6 +220,7 @@ check($res['ok'] === true && $res['telegram_notified'] === false && str_contains
 // C4: con chat_id y n8n apagado → telegram_notified = 0, sin resolver y error en el log
 $tgTicket = $ticket;
 $tgTicket['ticket_ref'] = 'INC-TEST-TG';
+$tgTicket['event_id'] = 'evt-inc-test-tg';
 $tgTicket['telegram_chat_id'] = '123456789';
 $service->processSupportTicket($tgTicket);
 $tgProposal = $proposal;
@@ -198,9 +233,9 @@ check((int) scalar($db, 'SELECT COUNT(*) FROM erp_integration_logs WHERE error_t
 
 // --- C4: cuadro de mando solo con datos reales ------------------------------------------------------
 $m = $service->getDashboardMetrics();
-check($m['orders']['total_count'] === 1, 'Cuadro de mando: 1 pedido integrado (el cancelado no cuenta)', (string) $m['orders']['total_count']);
+check($m['orders']['total_count'] === 2, 'Cuadro de mando: 2 pedidos (el cancelado no cuenta)', (string) $m['orders']['total_count']);
 check(array_keys($m['conversion']['funnel']) === ['orders_integrated', 'orders_paid', 'orders_with_ticket'], 'C4: el embudo solo tiene etapas con datos del Back-Office');
-check($m['conversion']['funnel']['orders_integrated'] === 2 && $m['conversion']['funnel']['orders_with_ticket'] === 1, 'C4: cifras del embudo salen de la BD', json_encode($m['conversion']['funnel']));
+check($m['conversion']['funnel']['orders_integrated'] === 3 && $m['conversion']['funnel']['orders_with_ticket'] === 1, 'C4: cifras del embudo salen de la BD', json_encode($m['conversion']['funnel']));
 $realMinutes = (float) scalar($db, 'SELECT AVG((julianday(resolved_at) - julianday(created_at)) * 1440) FROM erp_tickets WHERE resolved_at IS NOT NULL');
 check($m['tickets']['avg_resolution_minutes'] !== null && abs($m['tickets']['avg_resolution_minutes'] - round($realMinutes, 1)) < 0.05, 'C4: tiempo de resolución real, sin mínimos', (string) $m['tickets']['avg_resolution_minutes']);
 check($m['integration']['failed_events'] >= 5, 'Cuadro de mando: errores de integración contabilizados por tipo', (string) $m['integration']['failed_events']);

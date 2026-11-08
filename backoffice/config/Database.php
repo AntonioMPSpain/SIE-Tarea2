@@ -10,7 +10,7 @@ use PDOException;
 class Database
 {
     /** Versión de database/schema.sql (PRAGMA user_version). Subirla en cada cambio del esquema. */
-    public const SCHEMA_VERSION = 3;
+    public const SCHEMA_VERSION = 4;
 
     /** Secretos sin los que la aplicación no arranca (ni con un valor por defecto ni con el de .env.example). */
     public const REQUIRED_SECRETS = ['INTEGRATION_API_KEY', 'WEBHOOK_HMAC_SECRET'];

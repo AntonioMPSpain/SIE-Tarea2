@@ -124,5 +124,13 @@ CREATE TABLE IF NOT EXISTS erp_integration_logs (
     created_at DATETIME NOT NULL
 );
 
+-- Idempotencia: eventos ya procesados (event_id de la tienda). Un evento repetido se responde como «duplicate».
+CREATE TABLE IF NOT EXISTS erp_processed_events (
+    event_id VARCHAR(100) PRIMARY KEY,
+    event_type VARCHAR(80) NOT NULL,
+    entity_ref VARCHAR(80) NOT NULL,
+    processed_at DATETIME NOT NULL
+);
+
 -- Versión del esquema: Database::SCHEMA_VERSION debe coincidir (si no, hay que recrear la base de datos)
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;

@@ -705,7 +705,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
 
             <div class="space-y-3">
                 <?php foreach ($logs as $log):
-                    $isOk = ($log['status'] === 'SUCCESS');
+                    $isOk = in_array($log['status'], ['SUCCESS', 'DUPLICADO'], true); // un duplicado no es un error
                 ?>
                     <details class="card-glass rounded-xl p-4 group">
                         <summary class="cursor-pointer list-none flex flex-wrap items-center justify-between gap-3">
@@ -831,6 +831,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     order_ok: {
                         type: 'order',
                         body: {
+                            event_id: "c4e8b2d1-6f3a-4d9c-8b7e-2a1f5d0c9e47",
                             execution_id: "exec_live_demo_01",
                             event_type: "order.created",
                             order_ref: "PQ-20261108-LIVE99",

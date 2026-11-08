@@ -52,6 +52,7 @@ class Seeder
         $db->exec('DELETE FROM erp_tickets;');
         $db->exec('DELETE FROM erp_ai_audits;');
         $db->exec('DELETE FROM erp_integration_logs;');
+        $db->exec('DELETE FROM erp_processed_events;');
         $db->exec('DELETE FROM erp_inventory;');
 
         self::seedInventoryOnly($db);
