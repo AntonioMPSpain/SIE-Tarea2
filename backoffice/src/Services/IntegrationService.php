@@ -530,38 +530,38 @@ class IntegrationService
                 return $res;
             }
 
-            // Notificar a n8n si el cambio nace en el Back-Office
-            $webhookResult = null;
-            $syncState = 'SINCRONIZADO';
-            if ($notifyExternalN8n) {
-                $webhookResult = WebhookNotifier::dispatch('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'order.status_changed', [
-                    'order_ref'       => $orderRef,
-                    'previous_status' => $prevStatus,
-                    'new_status'      => $newStatus,
-                    'priority'        => $priorityToSave,
-                    'customer_email'  => $order['customer_email'],
-                    'origin'          => 'backoffice_erp',
-                ]);
-                if (!$webhookResult['dispatched']) {
-                    $syncState = 'PENDIENTE_SINCRONIZACION';
-                }
-            }
-
-            $upd = $this->db->prepare('
+            // 1) PRIMERO se guarda el cambio y, en la misma transacción, el aviso para n8n en la bandeja de salida
+            $this->db->beginTransaction();
+            $this->db->prepare('
                 UPDATE erp_orders
                 SET order_status = :status,
                     priority = :priority,
                     sync_status = :sync_status,
                     updated_at = :updated_at
                 WHERE order_ref = :ref
-            ');
-            $upd->execute([
+            ')->execute([
                 ':status'      => $newStatus,
                 ':priority'    => $priorityToSave,
-                ':sync_status' => $syncState,
+                ':sync_status' => $notifyExternalN8n ? 'PENDIENTE_SINCRONIZACION' : 'SINCRONIZADO',
                 ':updated_at'  => date('Y-m-d H:i:s'),
                 ':ref'         => $orderRef,
             ]);
+            $outboxId = null;
+            if ($notifyExternalN8n) {
+                $outboxId = $this->enqueueWebhook('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'order.status_changed', [
+                    'order_ref'       => $orderRef,
+                    'previous_status' => $prevStatus,
+                    'new_status'      => $newStatus,
+                    'priority'        => $priorityToSave,
+                    'customer_email'  => $order['customer_email'],
+                    'origin'          => 'backoffice_erp',
+                ], 'order', $orderRef);
+            }
+            $this->db->commit();
+
+            // 2) DESPUÉS se intenta enviar; si n8n no responde 2xx, queda PENDIENTE_SINCRONIZACION para el reintento
+            $webhookResult = $outboxId !== null ? $this->deliverWebhook($outboxId) : null;
+            $syncState = ($webhookResult === null || $webhookResult['dispatched']) ? 'SINCRONIZADO' : 'PENDIENTE_SINCRONIZACION';
 
             $msg = "Estado de pedido {$orderRef} actualizado ({$prevStatus} -> {$newStatus}, Prioridad: {$priorityToSave}). Estado sync: {$syncState}.";
             $res = [
@@ -603,32 +603,35 @@ class IntegrationService
         }
 
         $prevStock = (int) $inv['stock_available'];
-        $webhookResult = null;
-        $syncState = 'SINCRONIZADO';
-        if ($notifyExternalN8n) {
-            $webhookResult = WebhookNotifier::dispatch('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'inventory.stock_updated', [
-                'sku'            => $sku,
-                'product_name'   => $inv['product_name'],
-                'variant_size'   => $inv['variant_size'],
-                'previous_stock' => $prevStock,
-                'new_stock'      => $newStock,
-                'origin'         => 'backoffice_erp',
-            ]);
-            if (!$webhookResult['dispatched']) {
-                $syncState = 'PENDIENTE_SINCRONIZACION';
-            }
-        }
 
+        // 1) PRIMERO se guarda el cambio y el aviso para n8n (misma transacción)
+        $this->db->beginTransaction();
         $this->db->prepare('
             UPDATE erp_inventory
             SET stock_available = :stock, sync_status = :sync, updated_at = :updated
             WHERE sku = :sku
         ')->execute([
             ':stock'   => $newStock,
-            ':sync'    => $syncState,
+            ':sync'    => $notifyExternalN8n ? 'PENDIENTE_SINCRONIZACION' : 'SINCRONIZADO',
             ':updated' => date('Y-m-d H:i:s'),
             ':sku'     => $sku,
         ]);
+        $outboxId = null;
+        if ($notifyExternalN8n) {
+            $outboxId = $this->enqueueWebhook('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'inventory.stock_updated', [
+                'sku'            => $sku,
+                'product_name'   => $inv['product_name'],
+                'variant_size'   => $inv['variant_size'],
+                'previous_stock' => $prevStock,
+                'new_stock'      => $newStock,
+                'origin'         => 'backoffice_erp',
+            ], 'inventory', $sku);
+        }
+        $this->db->commit();
+
+        // 2) DESPUÉS se intenta enviar
+        $webhookResult = $outboxId !== null ? $this->deliverWebhook($outboxId) : null;
+        $syncState = ($webhookResult === null || $webhookResult['dispatched']) ? 'SINCRONIZADO' : 'PENDIENTE_SINCRONIZACION';
 
         $msg = "Stock de {$sku} ({$inv['product_name']} {$inv['variant_size']}) actualizado ({$prevStock} -> {$newStock} uds). Estado sync: {$syncState}.";
         $res = [
@@ -639,6 +642,7 @@ class IntegrationService
             'previous_stock' => $prevStock,
             'new_stock'      => $newStock,
             'sync_status'    => $syncState,
+            'webhook_dispatch' => $webhookResult,
             'message'        => $msg,
         ];
         $this->logExecution($executionId, 'ESCENARIO_2_SINCRONIZACION', 'inventory.stock_updated', $direction, $sku, 'SUCCESS', null, $msg, $payload, $res, $startTime);
@@ -1008,66 +1012,49 @@ class IntegrationService
         $stmtTicket->execute([':ref' => $audit['ticket_ref']]);
         $ticket = $stmtTicket->fetch();
 
-        $telegramDispatched = 0;
-        $webhookInfo = null;
-
         $chatId = $ticket ? $this->stringOrNull($ticket['telegram_chat_id'] ?? null) : null;
-        $noChatId = false;
+        $noChatId = $normalizedDecision === 'aprobado' && $chatId === null;
+        $outboxId = null;
 
-        if ($normalizedDecision === 'aprobado' && $chatId === null) {
-            // Sin chat_id no se puede notificar por Telegram: no se intenta y queda constancia
-            $noChatId = true;
-            if ($ticket) {
-                $this->db->prepare('
-                    UPDATE erp_tickets
-                    SET status = "RESUELTA", resolution_notes = :notes, resolved_at = :resolved_at
-                    WHERE ticket_ref = :ref
-                ')->execute([
-                    ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Sin chat_id de Telegram: no se notifica por Telegram (avisar al cliente por otro canal).",
-                    ':resolved_at' => $now,
-                    ':ref'         => $audit['ticket_ref'],
-                ]);
-            }
-        } elseif ($normalizedDecision === 'aprobado') {
-            $webhookInfo = WebhookNotifier::dispatch('N8N_WEBHOOK_HUMAN_REVIEW_URL', 'ai.proposal.approved', [
-                'audit_id'                 => $auditId,
-                'ticket_ref'               => $audit['ticket_ref'],
-                'order_ref'                => $audit['order_ref'],
-                'approved_action'          => $audit['proposed_action'],
-                'customer_telegram_chat_id'=> $chatId,
-                'customer_message'         => $audit['proposed_customer_message'],
-                'reviewed_by'              => $reviewerName,
-                'reviewed_at'              => $now,
-            ]);
-            // Solo se da por notificado si n8n confirma la recepción (HTTP 2xx)
-            $telegramDispatched = $webhookInfo['dispatched'] ? 1 : 0;
-
-            if ($ticket) {
-                if ($telegramDispatched === 1) {
-                    // Incidencia resuelta: resolved_at real, el tiempo de resolución se calcula con él
+        // 1) PRIMERO se guarda la decisión humana (y, si hay que notificar, el aviso para n8n) en una transacción
+        $this->db->beginTransaction();
+        try {
+            if ($normalizedDecision === 'aprobado' && $noChatId) {
+                // Sin chat_id no se puede notificar por Telegram: no se intenta y queda constancia
+                if ($ticket) {
                     $this->db->prepare('
                         UPDATE erp_tickets
                         SET status = "RESUELTA", resolution_notes = :notes, resolved_at = :resolved_at
                         WHERE ticket_ref = :ref
                     ')->execute([
-                        ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. n8n confirmó la recepción para Telegram (HTTP {$webhookInfo['http_code']}).",
+                        ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Sin chat_id de Telegram: no se notifica por Telegram (avisar al cliente por otro canal).",
                         ':resolved_at' => $now,
                         ':ref'         => $audit['ticket_ref'],
                     ]);
-                } else {
-                    // Aprobada pero sin notificar: no se marca como resuelta
+                }
+            } elseif ($normalizedDecision === 'aprobado') {
+                // Aprobada: la incidencia NO se da por resuelta hasta que n8n confirme la notificación (2xx)
+                if ($ticket) {
                     $this->db->prepare('
                         UPDATE erp_tickets
                         SET status = "APROBADA_PENDIENTE_NOTIFICACION", resolution_notes = :notes
                         WHERE ticket_ref = :ref
                     ')->execute([
-                        ':notes' => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. La notificación por Telegram NO se ha podido enviar: {$webhookInfo['note']}",
+                        ':notes' => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Pendiente de que n8n confirme la notificación por Telegram.",
                         ':ref'   => $audit['ticket_ref'],
                     ]);
                 }
-            }
-        } else {
-            if ($ticket) {
+                $outboxId = $this->enqueueWebhook('N8N_WEBHOOK_HUMAN_REVIEW_URL', 'ai.proposal.approved', [
+                    'audit_id'                  => $auditId,
+                    'ticket_ref'                => $audit['ticket_ref'],
+                    'order_ref'                 => $audit['order_ref'],
+                    'approved_action'           => $audit['proposed_action'],
+                    'customer_telegram_chat_id' => $chatId,
+                    'customer_message'          => $audit['proposed_customer_message'],
+                    'reviewed_by'               => $reviewerName,
+                    'reviewed_at'               => $now,
+                ], 'ai_review', (string) $auditId);
+            } elseif ($ticket) {
                 $this->db->prepare('
                     UPDATE erp_tickets
                     SET status = "ABIERTA_MANUAL",
@@ -1078,45 +1065,53 @@ class IntegrationService
                     ':ref'   => $audit['ticket_ref'],
                 ]);
             }
-        }
 
-        // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
-        //    (solo si la transición está permitida: un pedido cancelado no pasa a incidencia)
-        if ($normalizedDecision === 'aprobado' && !empty($audit['order_ref'])) {
-            $stmtOrder = $this->db->prepare('SELECT order_status FROM erp_orders WHERE order_ref = :r LIMIT 1');
-            $stmtOrder->execute([':r' => $audit['order_ref']]);
-            $currentStatus = $stmtOrder->fetchColumn();
-            if ($currentStatus !== false && $this->isAllowedTransition((string) $currentStatus, 'incidencia')) {
-                $this->db->prepare('
-                    UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
-                ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
+            // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
+            //    (solo si la transición está permitida: un pedido cancelado no pasa a incidencia)
+            if ($normalizedDecision === 'aprobado' && !empty($audit['order_ref'])) {
+                $stmtOrder = $this->db->prepare('SELECT order_status FROM erp_orders WHERE order_ref = :r LIMIT 1');
+                $stmtOrder->execute([':r' => $audit['order_ref']]);
+                $currentStatus = $stmtOrder->fetchColumn();
+                if ($currentStatus !== false && $this->isAllowedTransition((string) $currentStatus, 'incidencia')) {
+                    $this->db->prepare('
+                        UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
+                    ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
+                }
             }
+
+            $this->db->prepare('
+                UPDATE erp_ai_audits
+                SET final_status = :status,
+                    reviewed_by = :reviewer,
+                    review_comment = :comment,
+                    reviewed_at = :reviewed_at,
+                    telegram_notified = 0
+                WHERE id = :id
+            ')->execute([
+                ':status'      => $normalizedDecision,
+                ':reviewer'    => $reviewerName,
+                ':comment'     => $this->stringOrNull($comment),
+                ':reviewed_at' => $now,
+                ':id'          => $auditId,
+            ]);
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
         }
 
-        $this->db->prepare('
-            UPDATE erp_ai_audits
-            SET final_status = :status,
-                reviewed_by = :reviewer,
-                review_comment = :comment,
-                reviewed_at = :reviewed_at,
-                telegram_notified = :tg
-            WHERE id = :id
-        ')->execute([
-            ':status'      => $normalizedDecision,
-            ':reviewer'    => $reviewerName,
-            ':comment'     => $this->stringOrNull($comment),
-            ':reviewed_at' => $now,
-            ':tg'          => $telegramDispatched,
-            ':id'          => $auditId,
-        ]);
+        // 2) DESPUÉS se envía a n8n. Si responde 2xx, deliverWebhook() marca telegram_notified = 1 y resuelve
+        //    la incidencia; si no, queda pendiente para el reintento y el fallo queda en el log.
+        $webhookInfo = $outboxId !== null ? $this->deliverWebhook($outboxId) : null;
+        $telegramDispatched = ($webhookInfo['dispatched'] ?? false) ? 1 : 0;
 
         $msg = "Supervisión humana registrada: Propuesta #{$auditId} ({$audit['ticket_ref']}) marcada como '" . strtoupper($normalizedDecision) . "' por {$reviewerName}.";
-        if ($normalizedDecision === 'aprobado' && $noChatId) {
+        if ($noChatId) {
             $msg .= ' Sin chat_id: no se notifica por Telegram.';
         } elseif ($normalizedDecision === 'aprobado') {
             $msg .= $telegramDispatched === 1
                 ? ' Notificación entregada a n8n para Telegram.'
-                : ' ATENCIÓN: la notificación por Telegram no se ha podido enviar (queda pendiente).';
+                : ' ATENCIÓN: la notificación por Telegram no se ha podido enviar (queda pendiente de reintento).';
         }
         $res = [
             'ok'                => true,
@@ -1143,24 +1138,183 @@ class IntegrationService
             $startTime
         );
 
-        // Constancia del fallo de notificación en el log (cuenta en «errores por tipo» del cuadro de mando)
-        if ($normalizedDecision === 'aprobado' && $telegramDispatched === 0 && $webhookInfo !== null) {
-            $this->logExecution(
-                'exec_tg_' . bin2hex(random_bytes(4)),
-                'ESCENARIO_3_SUPERVISION_HUMANA',
-                'ai.proposal.approved',
-                'BackOffice -> n8n -> Telegram',
-                $audit['ticket_ref'],
-                'ERROR',
-                'ERR_NOTIFICACION_TELEGRAM',
-                'No se pudo entregar a n8n la notificación de Telegram: ' . $webhookInfo['note'],
-                ['audit_id' => $auditId],
-                $webhookInfo,
-                $startTime
-            );
+        return $res;
+    }
+
+    // =========================================================================
+    // BANDEJA DE SALIDA HACIA n8n (outbox) Y REINTENTOS
+    // Patrón: primero se guarda el cambio y el aviso (misma transacción) y después se envía.
+    // Si n8n no responde 2xx, el aviso queda PENDIENTE y se reintenta con el MISMO cuerpo y event_id.
+    // =========================================================================
+
+    /** Número máximo de intentos de envío de cada aviso (después queda FALLIDO). */
+    public const MAX_WEBHOOK_ATTEMPTS = 5;
+
+    /** Guarda un aviso para n8n en la bandeja de salida (llamar dentro de la transacción del cambio). */
+    private function enqueueWebhook(string $targetEnvKey, string $eventType, array $data, string $entityType, string $entityRef): int
+    {
+        $built = WebhookNotifier::buildBody($eventType, $data);
+        $this->db->prepare('
+            INSERT INTO erp_outbox_webhooks (event_id, event_type, target_env_key, body_json, entity_type, entity_ref, status, attempts, created_at)
+            VALUES (:event_id, :event_type, :target, :body, :entity_type, :entity_ref, "PENDIENTE", 0, :created_at)
+        ')->execute([
+            ':event_id'    => $built['event_id'],
+            ':event_type'  => $eventType,
+            ':target'      => $targetEnvKey,
+            ':body'        => $built['body'],
+            ':entity_type' => $entityType,
+            ':entity_ref'  => $entityRef,
+            ':created_at'  => date('Y-m-d H:i:s'),
+        ]);
+        return (int) $this->db->lastInsertId();
+    }
+
+    /** Intenta entregar un aviso de la bandeja de salida y aplica sus efectos si n8n responde 2xx. */
+    public function deliverWebhook(int $outboxId): array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM erp_outbox_webhooks WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $outboxId]);
+        $row = $stmt->fetch();
+        if (!$row || $row['status'] !== 'PENDIENTE') {
+            return ['dispatched' => false, 'http_code' => 0, 'note' => "Aviso #{$outboxId} inexistente o ya no está pendiente."];
         }
 
-        return $res;
+        $startTime = microtime(true);
+        $result = WebhookNotifier::send($row['target_env_key'], $row['event_type'], $row['body_json']);
+        $attempts = (int) $row['attempts'] + 1;
+        $now = date('Y-m-d H:i:s');
+        $result['event_id'] = $row['event_id'];
+        $result['attempt'] = $attempts;
+
+        if ($result['dispatched']) {
+            $this->db->beginTransaction();
+            $this->db->prepare('
+                UPDATE erp_outbox_webhooks
+                SET status = "ENVIADO", attempts = :a, last_http_code = :c, last_error = NULL, last_attempt_at = :t, sent_at = :t
+                WHERE id = :id
+            ')->execute([':a' => $attempts, ':c' => $result['http_code'], ':t' => $now, ':id' => $outboxId]);
+            $this->applyDeliveryEffects($row, $result, $now);
+            $this->db->commit();
+            return $result;
+        }
+
+        $exhausted = $attempts >= self::MAX_WEBHOOK_ATTEMPTS;
+        $this->db->prepare('
+            UPDATE erp_outbox_webhooks
+            SET status = :s, attempts = :a, last_http_code = :c, last_error = :e, last_attempt_at = :t
+            WHERE id = :id
+        ')->execute([
+            ':s'  => $exhausted ? 'FALLIDO' : 'PENDIENTE',
+            ':a'  => $attempts,
+            ':c'  => $result['http_code'],
+            ':e'  => $result['note'],
+            ':t'  => $now,
+            ':id' => $outboxId,
+        ]);
+        if ($exhausted) {
+            $this->markDeliveryExhausted($row);
+        }
+        $result['exhausted'] = $exhausted;
+
+        // Cada intento fallido queda en el log (alimenta «errores por tipo» del cuadro de mando)
+        $isTelegram = $row['entity_type'] === 'ai_review';
+        $this->logExecution(
+            'exec_outbox_' . bin2hex(random_bytes(4)),
+            $isTelegram ? 'ESCENARIO_3_SUPERVISION_HUMANA' : 'ESCENARIO_2_SINCRONIZACION',
+            $row['event_type'],
+            $isTelegram ? 'BackOffice -> n8n -> Telegram' : 'BackOffice -> n8n -> eCommerce',
+            $row['entity_ref'],
+            'ERROR',
+            $isTelegram ? 'ERR_NOTIFICACION_TELEGRAM' : 'ERR_SINCRONIZACION_N8N',
+            "Intento {$attempts}/" . self::MAX_WEBHOOK_ATTEMPTS . " de {$row['event_id']} fallido: {$result['note']}"
+                . ($exhausted ? ' Se agotan los reintentos: queda FALLIDO.' : ' Queda pendiente de reintento.'),
+            ['outbox_id' => $outboxId, 'event_id' => $row['event_id']],
+            $result,
+            $startTime
+        );
+        return $result;
+    }
+
+    /**
+     * Reintenta los avisos PENDIENTES (lo llama un cron con bin/retry_webhooks.php o n8n con
+     * POST /api/v1/internal/webhooks/retry). Mismo cuerpo y mismo event_id que el primer intento.
+     */
+    public function retryPendingWebhooks(int $limit = 50): array
+    {
+        $stmt = $this->db->prepare('SELECT id FROM erp_outbox_webhooks WHERE status = "PENDIENTE" ORDER BY id ASC LIMIT :l');
+        $stmt->bindValue(':l', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        $ids = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+
+        $summary = ['processed' => 0, 'sent' => 0, 'still_pending' => 0, 'failed' => 0, 'details' => []];
+        foreach ($ids as $id) {
+            $r = $this->deliverWebhook($id);
+            $summary['processed']++;
+            if ($r['dispatched']) {
+                $summary['sent']++;
+            } elseif (!empty($r['exhausted'])) {
+                $summary['failed']++;
+            } else {
+                $summary['still_pending']++;
+            }
+            $summary['details'][] = ['outbox_id' => $id, 'event_id' => $r['event_id'] ?? null, 'dispatched' => $r['dispatched'], 'note' => $r['note']];
+        }
+        return $summary;
+    }
+
+    /** Efectos de un aviso entregado (n8n respondió 2xx). */
+    private function applyDeliveryEffects(array $row, array $result, string $now): void
+    {
+        switch ($row['entity_type']) {
+            case 'order':
+                if (!$this->hasUndeliveredWebhooks('order', $row['entity_ref'])) {
+                    $this->db->prepare('UPDATE erp_orders SET sync_status = "SINCRONIZADO" WHERE order_ref = :r')
+                        ->execute([':r' => $row['entity_ref']]);
+                }
+                break;
+            case 'inventory':
+                if (!$this->hasUndeliveredWebhooks('inventory', $row['entity_ref'])) {
+                    $this->db->prepare('UPDATE erp_inventory SET sync_status = "SINCRONIZADO" WHERE sku = :r')
+                        ->execute([':r' => $row['entity_ref']]);
+                }
+                break;
+            case 'ai_review':
+                // Notificación confirmada por n8n: ahora sí telegram_notified = 1 y la incidencia queda resuelta
+                $auditId = (int) $row['entity_ref'];
+                $this->db->prepare('UPDATE erp_ai_audits SET telegram_notified = 1 WHERE id = :id')->execute([':id' => $auditId]);
+                $this->db->prepare('
+                    UPDATE erp_tickets
+                    SET status = "RESUELTA", resolved_at = :t,
+                        resolution_notes = COALESCE(resolution_notes, "") || :note
+                    WHERE ticket_ref = (SELECT ticket_ref FROM erp_ai_audits WHERE id = :id)
+                      AND status = "APROBADA_PENDIENTE_NOTIFICACION"
+                ')->execute([
+                    ':t'    => $now,
+                    ':note' => " Notificación por Telegram confirmada por n8n (HTTP {$result['http_code']}, intento {$result['attempt']}).",
+                    ':id'   => $auditId,
+                ]);
+                break;
+        }
+    }
+
+    /** Se agotaron los reintentos: queda constancia en la entidad afectada. */
+    private function markDeliveryExhausted(array $row): void
+    {
+        if ($row['entity_type'] === 'order') {
+            $this->db->prepare('UPDATE erp_orders SET sync_status = "ERROR_SINCRONIZACION" WHERE order_ref = :r')->execute([':r' => $row['entity_ref']]);
+        } elseif ($row['entity_type'] === 'inventory') {
+            $this->db->prepare('UPDATE erp_inventory SET sync_status = "ERROR_SINCRONIZACION" WHERE sku = :r')->execute([':r' => $row['entity_ref']]);
+        }
+    }
+
+    private function hasUndeliveredWebhooks(string $entityType, string $entityRef): bool
+    {
+        $stmt = $this->db->prepare('
+            SELECT 1 FROM erp_outbox_webhooks
+            WHERE entity_type = :t AND entity_ref = :r AND status IN ("PENDIENTE", "FALLIDO") LIMIT 1
+        ');
+        $stmt->execute([':t' => $entityType, ':r' => $entityRef]);
+        return $stmt->fetchColumn() !== false;
     }
 
     // =========================================================================
@@ -1267,6 +1421,13 @@ class IntegrationService
             FROM erp_ai_audits
         ')->fetch();
 
+        // Avisos a n8n pendientes de entregar o fallidos (bandeja de salida)
+        $outboxStats = $this->db->query('
+            SELECT SUM(CASE WHEN status = "PENDIENTE" THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN status = "FALLIDO" THEN 1 ELSE 0 END) AS failed
+            FROM erp_outbox_webhooks
+        ')->fetch();
+
         // Stock bajo en almacén
         $lowStockCount = (int) $this->db->query('
             SELECT COUNT(*) FROM erp_inventory WHERE stock_available <= min_stock_threshold
@@ -1294,6 +1455,8 @@ class IntegrationService
                 'failed_events'  => (int) ($logStats['failed_events'] ?? 0),
                 'avg_latency_ms' => (float) ($logStats['avg_latency_ms'] ?? 0.0),
                 'errors_by_type' => $errorsByType,
+                'pending_webhooks' => (int) ($outboxStats['pending'] ?? 0),
+                'failed_webhooks'  => (int) ($outboxStats['failed'] ?? 0),
             ],
             'conversion' => [
                 'funnel'                  => $funnel,

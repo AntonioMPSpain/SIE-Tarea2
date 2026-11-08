@@ -133,5 +133,24 @@ CREATE TABLE IF NOT EXISTS erp_processed_events (
     processed_at DATETIME NOT NULL
 );
 
+-- Bandeja de salida hacia n8n (outbox): primero se guarda el cambio y su aviso, después se envía.
+-- Los avisos que n8n no confirma (2xx) quedan PENDIENTE y se reintentan con el mismo cuerpo y event_id.
+CREATE TABLE IF NOT EXISTS erp_outbox_webhooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id VARCHAR(100) NOT NULL UNIQUE,
+    event_type VARCHAR(80) NOT NULL,
+    target_env_key VARCHAR(80) NOT NULL,
+    body_json TEXT NOT NULL,
+    entity_type VARCHAR(30) NOT NULL,
+    entity_ref VARCHAR(80) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_http_code INTEGER NULL,
+    last_error TEXT NULL,
+    created_at DATETIME NOT NULL,
+    last_attempt_at DATETIME NULL,
+    sent_at DATETIME NULL
+);
+
 -- Versión del esquema: Database::SCHEMA_VERSION debe coincidir (si no, hay que recrear la base de datos)
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;
