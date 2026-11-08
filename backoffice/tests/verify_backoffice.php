@@ -140,6 +140,20 @@ check((int) scalar($db, 'SELECT stock_available FROM erp_inventory WHERE sku = ?
 $res = $service->processOperationalChange(payload('escenario2_cambio_operativo'), false);
 check($res['ok'] === true && $res['new_status'] === 'enviado', 'Escenario 2: cambio de estado a enviado', $res['message'] ?? '');
 
+// --- C11: transiciones de estado (misma tabla que Order::TRANSITIONS de la tienda) --------------------
+$res = $service->processOperationalChange(payload('escenario2_cambio_operativo'), false);
+check($res['ok'] === true && ($res['unchanged'] ?? false) === true, 'C11: mismo estado → 200 sin cambios', $res['message'] ?? '');
+$cancelOrder = $order;
+$cancelOrder['order_ref'] = 'PQ-TEST-CANCELADO';
+$cancelOrder['items'] = [['sku' => 'SAL-003', 'product_name' => 'Salsa Verde Jalapeño & Lima', 'variant_size' => null, 'quantity' => 1, 'unit_price' => 5.90]];
+$cancelOrder['total_amount'] = 10.85;
+$service->processOrderEvent($cancelOrder);
+$res = $service->processOperationalChange(['change_type' => 'ORDER_STATUS', 'order_ref' => 'PQ-TEST-CANCELADO', 'new_status' => 'cancelado'], false);
+check($res['ok'] === true, 'C11: pendiente_preparacion → cancelado permitido', $res['message'] ?? '');
+$res = $service->processOperationalChange(['change_type' => 'ORDER_STATUS', 'order_ref' => 'PQ-TEST-CANCELADO', 'new_status' => 'enviado'], false);
+check($res['ok'] === false && $res['error_code'] === 'ERR_TRANSICION_ESTADO', 'C11: cancelado → enviado → ERR_TRANSICION_ESTADO', $res['message'] ?? '');
+check(scalar($db, 'SELECT order_status FROM erp_orders WHERE order_ref = ?', ['PQ-TEST-CANCELADO']) === 'cancelado', 'C11: ... y el pedido sigue cancelado');
+
 // --- Escenario 3 y C8: incidencia y chat_id de Telegram -----------------------------------------------
 $ticket = payload('escenario3_incidencia_postventa');
 $res = $service->processSupportTicket($ticket);
@@ -184,9 +198,9 @@ check((int) scalar($db, 'SELECT COUNT(*) FROM erp_integration_logs WHERE error_t
 
 // --- C4: cuadro de mando solo con datos reales ------------------------------------------------------
 $m = $service->getDashboardMetrics();
-check($m['orders']['total_count'] === 1, 'Cuadro de mando: 1 pedido integrado', (string) $m['orders']['total_count']);
+check($m['orders']['total_count'] === 1, 'Cuadro de mando: 1 pedido integrado (el cancelado no cuenta)', (string) $m['orders']['total_count']);
 check(array_keys($m['conversion']['funnel']) === ['orders_integrated', 'orders_paid', 'orders_with_ticket'], 'C4: el embudo solo tiene etapas con datos del Back-Office');
-check($m['conversion']['funnel']['orders_integrated'] === 1 && $m['conversion']['funnel']['orders_with_ticket'] === 1, 'C4: cifras del embudo salen de la BD', json_encode($m['conversion']['funnel']));
+check($m['conversion']['funnel']['orders_integrated'] === 2 && $m['conversion']['funnel']['orders_with_ticket'] === 1, 'C4: cifras del embudo salen de la BD', json_encode($m['conversion']['funnel']));
 $realMinutes = (float) scalar($db, 'SELECT AVG((julianday(resolved_at) - julianday(created_at)) * 1440) FROM erp_tickets WHERE resolved_at IS NOT NULL');
 check($m['tickets']['avg_resolution_minutes'] !== null && abs($m['tickets']['avg_resolution_minutes'] - round($realMinutes, 1)) < 0.05, 'C4: tiempo de resolución real, sin mínimos', (string) $m['tickets']['avg_resolution_minutes']);
 check($m['integration']['failed_events'] >= 5, 'Cuadro de mando: errores de integración contabilizados por tipo', (string) $m['integration']['failed_events']);

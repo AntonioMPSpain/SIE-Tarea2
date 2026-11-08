@@ -476,7 +476,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                 </div>
                                 <div class="flex flex-wrap items-center gap-2">
                                     <select name="new_status" class="bg-slate-800 border border-slate-700 rounded px-2.5 py-1 text-xs text-white">
-                                        <?php foreach (['pendiente_preparacion', 'enviado', 'incidencia', 'cancelado', 'pagado_simulado'] as $st): ?>
+                                        <?php foreach (array_merge([$ord['order_status']], \Piquantum\BackOffice\Services\IntegrationService::ORDER_TRANSITIONS[$ord['order_status']] ?? []) as $st): ?>
                                             <option value="<?= $st ?>" <?= $ord['order_status'] === $st ? 'selected' : '' ?>>Estado: <?= $st ?></option>
                                         <?php endforeach; ?>
                                     </select>

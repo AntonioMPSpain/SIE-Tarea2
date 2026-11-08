@@ -10,6 +10,19 @@ use Throwable;
 
 class IntegrationService
 {
+    /** Estados de pedido del contrato (los mismos que Order de la tienda, Tarea 1). */
+    public const ORDER_STATUSES = ['creado', 'pagado_simulado', 'pendiente_preparacion', 'enviado', 'cancelado', 'incidencia'];
+
+    /** Transiciones permitidas desde cada estado: misma tabla que Order::TRANSITIONS de la tienda (Tarea 1). */
+    public const ORDER_TRANSITIONS = [
+        'creado'                => ['cancelado', 'incidencia'],
+        'pagado_simulado'       => ['pendiente_preparacion', 'cancelado', 'incidencia'],
+        'pendiente_preparacion' => ['enviado', 'cancelado', 'incidencia'],
+        'enviado'               => ['incidencia'],
+        'incidencia'            => ['pendiente_preparacion', 'cancelado'],
+        'cancelado'             => [],
+    ];
+
     private PDO $db;
 
     public function __construct(?PDO $db = null)
@@ -402,7 +415,7 @@ class IntegrationService
             $newStatus = trim((string) ($payload['new_status'] ?? ''));
             $newPriority = trim((string) ($payload['priority'] ?? ''));
 
-            $allowedStatuses = ['creado', 'pagado_simulado', 'pendiente_preparacion', 'enviado', 'cancelado', 'incidencia'];
+            $allowedStatuses = self::ORDER_STATUSES;
 
             if ($orderRef === '' || !in_array($newStatus, $allowedStatuses, true)) {
                 $msg = "Cambio operativo rechazado: order_ref vacío o estado '{$newStatus}' fuera del contrato (" . implode(', ', $allowedStatuses) . ").";
@@ -424,6 +437,37 @@ class IntegrationService
 
             $prevStatus = $order['order_status'];
             $priorityToSave = $newPriority !== '' ? $newPriority : $order['priority'];
+
+            // Mismo estado: 200 sin cambios de estado ni aviso a n8n (como mucho se actualiza la prioridad)
+            if ($newStatus === $prevStatus) {
+                if ($priorityToSave !== $order['priority']) {
+                    $this->db->prepare('UPDATE erp_orders SET priority = :p, updated_at = :u WHERE order_ref = :ref')
+                        ->execute([':p' => $priorityToSave, ':u' => date('Y-m-d H:i:s'), ':ref' => $orderRef]);
+                }
+                $msg = "Pedido {$orderRef} ya está en estado '{$newStatus}': sin cambios de estado (prioridad: {$priorityToSave}).";
+                $res = [
+                    'ok'              => true,
+                    'execution_id'    => $executionId,
+                    'scenario'        => 'ESCENARIO_2_SINCRONIZACION',
+                    'order_ref'       => $orderRef,
+                    'previous_status' => $prevStatus,
+                    'new_status'      => $newStatus,
+                    'unchanged'       => true,
+                    'message'         => $msg,
+                ];
+                $this->logExecution($executionId, 'ESCENARIO_2_SINCRONIZACION', 'order.status_changed', $direction, $orderRef, 'SUCCESS', null, $msg, $payload, $res, $startTime);
+                return $res;
+            }
+
+            // Transición no permitida (p. ej. cancelado -> enviado): se rechaza sin tocar el pedido
+            if (!$this->isAllowedTransition($prevStatus, $newStatus)) {
+                $allowedNext = self::ORDER_TRANSITIONS[$prevStatus] ?? [];
+                $msg = "Transición no permitida para {$orderRef}: '{$prevStatus}' -> '{$newStatus}'. Desde '{$prevStatus}' solo se puede pasar a: "
+                    . ($allowedNext ? implode(', ', $allowedNext) : 'ninguno (estado final)') . '.';
+                $res = ['ok' => false, 'error_code' => 'ERR_TRANSICION_ESTADO', 'allowed_next' => $allowedNext, 'message' => $msg];
+                $this->logExecution($executionId, 'ESCENARIO_2_SINCRONIZACION', 'order.status_changed', $direction, $orderRef, 'ERROR', 'ERR_TRANSICION_ESTADO', $msg, $payload, $res, $startTime);
+                return $res;
+            }
 
             // Notificar a n8n si el cambio nace en el Back-Office
             $webhookResult = null;
@@ -966,10 +1010,16 @@ class IntegrationService
         }
 
         // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
+        //    (solo si la transición está permitida: un pedido cancelado no pasa a incidencia)
         if ($normalizedDecision === 'aprobado' && !empty($audit['order_ref'])) {
-            $this->db->prepare('
-                UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
-            ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
+            $stmtOrder = $this->db->prepare('SELECT order_status FROM erp_orders WHERE order_ref = :r LIMIT 1');
+            $stmtOrder->execute([':r' => $audit['order_ref']]);
+            $currentStatus = $stmtOrder->fetchColumn();
+            if ($currentStatus !== false && $this->isAllowedTransition((string) $currentStatus, 'incidencia')) {
+                $this->db->prepare('
+                    UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
+                ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
+            }
         }
 
         $this->db->prepare('
@@ -1189,6 +1239,12 @@ class IntegrationService
                 'low_stock_alerts' => $lowStockCount,
             ],
         ];
+    }
+
+    /** ¿Se puede pasar de $from a $to según ORDER_TRANSITIONS? */
+    public function isAllowedTransition(string $from, string $to): bool
+    {
+        return in_array($to, self::ORDER_TRANSITIONS[$from] ?? [], true);
     }
 
     /**
