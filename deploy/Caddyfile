@@ -1,0 +1,14 @@
+# Proxy inverso con HTTPS automático (Let's Encrypt).
+# Requisito: los registros A de erp y n8n apuntan a la IP de la VM y los puertos
+# 80 y 443 están abiertos en el firewall de Google Cloud.
+
+erp.piquantum.onl {
+	# La API del back-office no se publica: solo n8n la usa, por la red interna
+	respond /api/* 403
+	reverse_proxy backoffice:8080
+}
+
+n8n.piquantum.onl {
+	# Editor (con el login de n8n) y webhooks públicos que llama la tienda
+	reverse_proxy n8n:5678
+}
