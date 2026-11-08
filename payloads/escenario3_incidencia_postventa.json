@@ -5,7 +5,6 @@
   "order_ref": "PQ-20261108-A901BC",
   "customer_name": "Laura Prueba",
   "customer_email": "laura@example.com",
-  "telegram_chat_id": "@laura_piquantum_test",
   "subject": "Bote de Salsa Chipotle Ahumado 100 ml roto durante el transporte",
   "description": "Hola equipo de Piquantum, me acaba de llegar el pedido PQ-20261108-A901BC pero uno de los dos botes de Salsa Chipotle Ahumado de 100 ml ha llegado con el cristal roto. Solicito la reposición de la unidad dañada.",
   "category": "ROTURA_TRANSPORTE",

@@ -556,7 +556,9 @@ class IntegrationService
         $customerName = trim((string) ($payload['customer_name'] ?? ($payload['customer']['name'] ?? '')));
         $subject = trim((string) ($payload['subject'] ?? ''));
         $description = trim((string) ($payload['description'] ?? ''));
-        $telegramChatId = trim((string) ($payload['telegram_chat_id'] ?? '@laura_cliente_test'));
+        // chat_id de Telegram: opcional y sin valor por defecto. Un bot no puede escribir a un @usuario:
+        // necesita el chat_id numérico (negativo en grupos) de alguien que haya escrito antes al bot.
+        $telegramChatId = $this->stringOrNull($payload['telegram_chat_id'] ?? null);
 
         $missing = [];
         if ($ticketRef === '') {
@@ -573,6 +575,9 @@ class IntegrationService
         }
         if ($description === '') {
             $missing[] = 'description';
+        }
+        if ($telegramChatId !== null && !preg_match('/^-?\d+$/', $telegramChatId)) {
+            $missing[] = 'telegram_chat_id (numérico; no se admite @usuario)';
         }
 
         if (!empty($missing)) {
@@ -891,13 +896,30 @@ class IntegrationService
         $telegramDispatched = 0;
         $webhookInfo = null;
 
-        if ($normalizedDecision === 'aprobado') {
+        $chatId = $ticket ? $this->stringOrNull($ticket['telegram_chat_id'] ?? null) : null;
+        $noChatId = false;
+
+        if ($normalizedDecision === 'aprobado' && $chatId === null) {
+            // Sin chat_id no se puede notificar por Telegram: no se intenta y queda constancia
+            $noChatId = true;
+            if ($ticket) {
+                $this->db->prepare('
+                    UPDATE erp_tickets
+                    SET status = "RESUELTA", resolution_notes = :notes, resolved_at = :resolved_at
+                    WHERE ticket_ref = :ref
+                ')->execute([
+                    ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Sin chat_id de Telegram: no se notifica por Telegram (avisar al cliente por otro canal).",
+                    ':resolved_at' => $now,
+                    ':ref'         => $audit['ticket_ref'],
+                ]);
+            }
+        } elseif ($normalizedDecision === 'aprobado') {
             $webhookInfo = WebhookNotifier::dispatch('N8N_WEBHOOK_HUMAN_REVIEW_URL', 'ai.proposal.approved', [
                 'audit_id'                 => $auditId,
                 'ticket_ref'               => $audit['ticket_ref'],
                 'order_ref'                => $audit['order_ref'],
                 'approved_action'          => $audit['proposed_action'],
-                'customer_telegram_chat_id'=> $ticket['telegram_chat_id'] ?? '@laura_cliente_test',
+                'customer_telegram_chat_id'=> $chatId,
                 'customer_message'         => $audit['proposed_customer_message'],
                 'reviewed_by'              => $reviewerName,
                 'reviewed_at'              => $now,
@@ -929,13 +951,6 @@ class IntegrationService
                     ]);
                 }
             }
-
-            // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
-            if (!empty($audit['order_ref'])) {
-                $this->db->prepare('
-                    UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
-                ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
-            }
         } else {
             if ($ticket) {
                 $this->db->prepare('
@@ -948,6 +963,13 @@ class IntegrationService
                     ':ref'   => $audit['ticket_ref'],
                 ]);
             }
+        }
+
+        // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
+        if ($normalizedDecision === 'aprobado' && !empty($audit['order_ref'])) {
+            $this->db->prepare('
+                UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
+            ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
         }
 
         $this->db->prepare('
@@ -968,7 +990,9 @@ class IntegrationService
         ]);
 
         $msg = "Supervisión humana registrada: Propuesta #{$auditId} ({$audit['ticket_ref']}) marcada como '" . strtoupper($normalizedDecision) . "' por {$reviewerName}.";
-        if ($normalizedDecision === 'aprobado') {
+        if ($normalizedDecision === 'aprobado' && $noChatId) {
+            $msg .= ' Sin chat_id: no se notifica por Telegram.';
+        } elseif ($normalizedDecision === 'aprobado') {
             $msg .= $telegramDispatched === 1
                 ? ' Notificación entregada a n8n para Telegram.'
                 : ' ATENCIÓN: la notificación por Telegram no se ha podido enviar (queda pendiente).';

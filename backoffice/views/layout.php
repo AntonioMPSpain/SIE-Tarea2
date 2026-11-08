@@ -881,7 +881,6 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                             order_ref: "PQ-20261108-LIVE99",
                             customer_name: "Carlos Demo",
                             customer_email: "carlos@example.com",
-                            telegram_chat_id: "@marta_piquantum_test",
                             subject: "Duda sobre la conservación de la Salsa Verde Jalapeño & Lima",
                             description: "Hola, acabo de recibir el pedido PQ-20261108-LIVE99 y quería saber si la Salsa Verde Jalapeño & Lima hay que conservarla en frío una vez abierta.",
                             priority: "MEDIA"
