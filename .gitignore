@@ -1,0 +1,15 @@
+# Variables de entorno locales (nunca subir secretos)
+.env
+backoffice/.env
+
+# Base de datos SQLite autogenerada en ejecución (se recrea sola con schema.sql y Seeder.php)
+backoffice/storage/database/*.sqlite
+backoffice/storage/database/*.sqlite-journal
+backoffice/storage/database/*.sqlite-wal
+backoffice/storage/database/*.sqlite-shm
+
+# Archivos del sistema operativo o editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
