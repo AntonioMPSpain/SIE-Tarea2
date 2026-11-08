@@ -663,8 +663,9 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                         🛑 <strong>Supervisión Humana Obligatoria:</strong> El agente tiene prohibido enviar la notificación a Telegram o comprometer reposición de stock sin tu aprobación explícita.
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
-                                        <input type="text" name="reviewer_name" value="Antonio Martínez (Supervisor)"
-                                               class="bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-white" placeholder="Nombre del revisor">
+                                        <span class="text-xs text-slate-300" title="El revisor es el operador con sesión iniciada">
+                                            👤 Revisa: <strong><?= htmlspecialchars((string) ($currentUser['email'] ?? '')) ?></strong>
+                                        </span>
                                         <input type="text" name="review_comment" value="Revisado stock y pedido; se autoriza envío a Telegram."
                                                class="bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-white w-64" placeholder="Comentario de auditoría">
                                         <button type="submit" name="decision" value="aprobado"
