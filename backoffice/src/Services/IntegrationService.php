@@ -67,6 +67,9 @@ class IntegrationService
         $occurredTs = $occurredAtRaw !== '' ? strtotime($occurredAtRaw) : false;
         $totalAmount = $this->numberOrNull($payload['total_amount'] ?? null);
         $shippingAmount = $this->numberOrNull($payload['shipping_amount'] ?? null);
+        $discountCode = $this->stringOrNull($payload['discount_code'] ?? null);
+        $discountRaw = $payload['discount_amount'] ?? null;
+        $discountAmount = $discountRaw === null ? null : $this->numberOrNull($discountRaw);
 
         if ($eventId === '') {
             $missingFields[] = 'event_id (identificador único del evento de la tienda)';
@@ -88,6 +91,12 @@ class IntegrationService
         }
         if ($shippingAmount === null || $shippingAmount < 0) {
             $missingFields[] = 'shipping_amount (número >= 0)';
+        }
+        // discount_amount: importe del descuento (IVA incluido). Obligatorio si hay discount_code; sin código, 0.
+        if ($discountRaw !== null && ($discountAmount === null || $discountAmount < 0)) {
+            $missingFields[] = 'discount_amount (número >= 0)';
+        } elseif ($discountCode !== null && $discountAmount === null) {
+            $missingFields[] = 'discount_amount (obligatorio si hay discount_code)';
         }
         if (!is_array($items) || count($items) === 0) {
             $missingFields[] = 'items[] (mínimo 1 línea de pedido)';
@@ -146,6 +155,31 @@ class IntegrationService
                 $startTime
             );
 
+            return $response;
+        }
+
+        // 1b. El total tiene que cuadrar: suma de líneas − descuento + envío (±0,01), como calcula la tienda
+        $discountAmount = $discountAmount ?? 0.0;
+        $linesTotal = 0.0;
+        foreach ($items as $item) {
+            $linesTotal += round((int) $item['quantity'] * (float) $this->numberOrNull($item['unit_price']), 2);
+        }
+        $linesTotal = round($linesTotal, 2);
+        $expectedTotal = round($linesTotal - $discountAmount + $shippingAmount, 2);
+        if (abs($expectedTotal - $totalAmount) > 0.01) {
+            $msg = sprintf(
+                'Importe inválido: total_amount %.2f no cuadra con líneas %.2f − descuento %.2f + envío %.2f = %.2f.',
+                $totalAmount, $linesTotal, $discountAmount, $shippingAmount, $expectedTotal
+            );
+            $response = [
+                'ok'             => false,
+                'execution_id'   => $executionId,
+                'scenario'       => 'ESCENARIO_1_PEDIDO',
+                'error_code'     => 'ERR_IMPORTE_INVALIDO',
+                'expected_total' => $expectedTotal,
+                'message'        => $msg,
+            ];
+            $this->logExecution($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, 'ERROR', 'ERR_IMPORTE_INVALIDO', $msg, $payload, $response, $startTime);
             return $response;
         }
 
@@ -256,20 +290,20 @@ class IntegrationService
                     $orderResult = 'ignored';
                 }
             } else {
-                // Calcular desglose de IVA (21% incluido como en Piquantum Tarea 1)
-                $subtotal = round($totalAmount / 1.21, 2);
-                $tax = round($totalAmount - $subtotal, 2);
+                // Desglose como en la tienda (Tarea 1): subtotal = suma de líneas; IVA del 21 % incluido en el total
+                $subtotal = $linesTotal;
+                $tax = round($totalAmount - $totalAmount / 1.21, 2);
                 $shipping = $shippingAmount;
 
                 $insOrd = $this->db->prepare('
                     INSERT INTO erp_orders (
                         order_ref, customer_id, customer_name, customer_email, shipping_address,
-                        subtotal_amount, tax_amount, shipping_amount, discount_code, total_amount,
+                        subtotal_amount, tax_amount, shipping_amount, discount_code, discount_amount, total_amount,
                         payment_method, payment_status, order_status, priority, sync_status,
                         channel_created_at, integrated_at, updated_at
                     ) VALUES (
                         :order_ref, :customer_id, :customer_name, :customer_email, :shipping_address,
-                        :subtotal, :tax, :shipping, :discount_code, :total,
+                        :subtotal, :tax, :shipping, :discount_code, :discount_amount, :total,
                         :payment_method, :payment_status, :order_status, :priority, :sync_status,
                         :channel_created_at, :integrated_at, :updated_at
                     )
@@ -283,7 +317,8 @@ class IntegrationService
                     ':subtotal'           => $subtotal,
                     ':tax'                => $tax,
                     ':shipping'           => $shipping,
-                    ':discount_code'      => $this->stringOrNull($payload['discount_code'] ?? null),
+                    ':discount_code'      => $discountCode,
+                    ':discount_amount'    => $discountAmount,
                     ':total'              => $totalAmount,
                     ':payment_method'     => $this->stringOrNull($payload['payment_method'] ?? null),
                     ':payment_status'     => $paymentStatus,

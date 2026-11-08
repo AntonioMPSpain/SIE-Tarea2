@@ -27,6 +27,8 @@
       "unit_price": 8.9
     }
   ],
+  "discount_code": "BIENVENIDA10",
+  "discount_amount": 2.19,
   "shipping_amount": 4.95,
-  "total_amount": 26.85
+  "total_amount": 24.66
 }

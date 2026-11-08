@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS erp_orders (
     tax_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     shipping_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     discount_code VARCHAR(50) NULL,
+    discount_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     total_amount DECIMAL(10,2) NOT NULL,
     payment_method VARCHAR(50) NULL,
     payment_status VARCHAR(40) NOT NULL DEFAULT 'pagado_simulado',
@@ -133,4 +134,4 @@ CREATE TABLE IF NOT EXISTS erp_processed_events (
 );
 
 -- Versión del esquema: Database::SCHEMA_VERSION debe coincidir (si no, hay que recrear la base de datos)
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;

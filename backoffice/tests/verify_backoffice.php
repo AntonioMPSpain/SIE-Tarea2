@@ -134,6 +134,7 @@ check((int) scalar($db, 'SELECT COUNT(*) FROM erp_orders') === $ordersBefore, 'C
 $bad = $order;
 $bad['order_ref'] = 'PQ-TEST-STOCK';
 $bad['event_id'] = 'evt-pq-test-stock';
+unset($bad['discount_code'], $bad['discount_amount']);
 $bad['items'] = [['sku' => 'SAL-001-200ML', 'product_name' => 'Salsa Carolina Reaper Inferno', 'variant_size' => '200 ml', 'quantity' => 50, 'unit_price' => 18.50]];
 $bad['total_amount'] = 929.95;
 $res = $service->processOrderEvent($bad);
@@ -144,12 +145,29 @@ check((int) scalar($db, 'SELECT stock_available FROM erp_inventory WHERE sku = ?
 $res = $service->processOperationalChange(payload('escenario2_cambio_operativo'), false);
 check($res['ok'] === true && $res['new_status'] === 'enviado', 'Escenario 2: cambio de estado a enviado', $res['message'] ?? '');
 
+// --- C13: el total tiene que cuadrar (líneas − descuento + envío, ±0,01) -----------------------------
+$bad = $order;
+$bad['order_ref'] = 'PQ-TEST-TOTAL';
+$bad['event_id'] = 'evt-pq-test-total';
+unset($bad['discount_code'], $bad['discount_amount']);
+$bad['items'] = [['sku' => 'SAL-002-100ML', 'product_name' => 'Salsa Chipotle Ahumado', 'variant_size' => '100 ml', 'quantity' => 2, 'unit_price' => 6.50]];
+$bad['total_amount'] = 15.00; // 13,00 + 4,95 = 17,95
+$res = $service->processOrderEvent($bad);
+check($res['ok'] === false && $res['error_code'] === 'ERR_IMPORTE_INVALIDO' && abs($res['expected_total'] - 17.95) < 0.001, 'C13: total 15,00 con líneas 13,00 + envío 4,95 → ERR_IMPORTE_INVALIDO', $res['message'] ?? '');
+$bad['total_amount'] = 17.95;
+$bad['discount_code'] = 'BIENVENIDA10';
+$res = $service->processOrderEvent($bad);
+check($res['ok'] === false && str_contains($res['message'], 'discount_amount'), 'C13: discount_code sin discount_amount → rechazado');
+$row = $db->query("SELECT discount_code, discount_amount, subtotal_amount, total_amount FROM erp_orders WHERE order_ref = 'PQ-20261108-A901BC'")->fetch();
+check($row['discount_code'] === 'BIENVENIDA10' && abs((float) $row['discount_amount'] - 2.19) < 0.001 && abs((float) $row['subtotal_amount'] - 21.90) < 0.001, 'C13: el pedido guarda discount_amount y subtotal = suma de líneas', json_encode($row));
+
 // --- C11: transiciones de estado (misma tabla que Order::TRANSITIONS de la tienda) --------------------
 $res = $service->processOperationalChange(payload('escenario2_cambio_operativo'), false);
 check($res['ok'] === true && ($res['unchanged'] ?? false) === true, 'C11: mismo estado → 200 sin cambios', $res['message'] ?? '');
 $cancelOrder = $order;
 $cancelOrder['order_ref'] = 'PQ-TEST-CANCELADO';
 $cancelOrder['event_id'] = 'evt-pq-test-cancelado';
+unset($cancelOrder['discount_code'], $cancelOrder['discount_amount']);
 $cancelOrder['items'] = [['sku' => 'SAL-003', 'product_name' => 'Salsa Verde Jalapeño & Lima', 'variant_size' => null, 'quantity' => 1, 'unit_price' => 5.90]];
 $cancelOrder['total_amount'] = 10.85;
 $service->processOrderEvent($cancelOrder);
@@ -167,11 +185,12 @@ check((int) scalar($db, 'SELECT COUNT(*) FROM erp_orders') === $ordersBefore, 'C
 $late = $order;
 $late['event_id'] = 'evt-order-created-tardio';
 $late['status'] = 'creado';
-$late['total_amount'] = 999.99;
+$late['items'][0]['quantity'] = 3; // total distinto pero coherente: 19,50 + 8,90 − 2,19 + 4,95 = 31,16
+$late['total_amount'] = 31.16;
 $res = $service->processOrderEvent($late);
 check($res['ok'] === true && ($res['result'] ?? '') === 'ignored', 'C12: order.created que llega después de «enviado» → se ignora', $res['message'] ?? '');
 $row = $db->query("SELECT order_status, total_amount FROM erp_orders WHERE order_ref = 'PQ-20261108-A901BC'")->fetch();
-check($row['order_status'] === 'enviado' && abs((float) $row['total_amount'] - 26.85) < 0.001, 'C12: ... el estado no retrocede y el total no se sobrescribe', json_encode($row));
+check($row['order_status'] === 'enviado' && abs((float) $row['total_amount'] - 24.66) < 0.001, 'C12: ... el estado no retrocede y el total no se sobrescribe', json_encode($row));
 $noEvent = $order;
 unset($noEvent['event_id']);
 $res = $service->processOrderEvent($noEvent);
