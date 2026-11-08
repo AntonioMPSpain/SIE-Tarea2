@@ -82,8 +82,7 @@ CREATE TABLE IF NOT EXISTS erp_tickets (
     status VARCHAR(40) NOT NULL DEFAULT 'ABIERTA',
     resolution_notes TEXT NULL,
     created_at DATETIME NOT NULL,
-    resolved_at DATETIME NULL,
-    simulated_resolution_minutes INTEGER NULL
+    resolved_at DATETIME NULL
 );
 
 CREATE TABLE IF NOT EXISTS erp_ai_audits (
@@ -123,11 +122,4 @@ CREATE TABLE IF NOT EXISTS erp_integration_logs (
     response_json TEXT NULL,
     execution_ms INTEGER NOT NULL DEFAULT 18,
     created_at DATETIME NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS erp_funnel_counters (
-    event_name VARCHAR(80) PRIMARY KEY,
-    event_label VARCHAR(120) NOT NULL,
-    total_count INTEGER NOT NULL DEFAULT 0,
-    updated_at DATETIME NOT NULL
 );

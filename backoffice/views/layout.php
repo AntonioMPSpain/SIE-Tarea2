@@ -163,8 +163,9 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 <!-- Métrica 4: Tasa de conversión del flujo -->
                 <div class="card-glass rounded-xl p-4">
                     <div class="text-xs text-slate-400 font-medium uppercase">4. Tasa Conversión Flujo</div>
-                    <div class="text-3xl font-extrabold text-sky-400 mt-1"><?= number_format($metrics['conversion']['checkout_to_paid_pct'], 1, ',', '.') ?> %</div>
-                    <div class="text-xs text-slate-400 mt-1">Checkout → Pedido Integrado (Global: <?= number_format($metrics['conversion']['global_conversion_pct'], 1, ',', '.') ?>%)</div>
+                    <?php $paidPct = $metrics['conversion']['integrated_to_paid_pct']; $ticketPct = $metrics['conversion']['paid_with_ticket_pct']; ?>
+                    <div class="text-3xl font-extrabold text-sky-400 mt-1"><?= $paidPct === null ? '—' : number_format($paidPct, 1, ',', '.') . ' %' ?></div>
+                    <div class="text-xs text-slate-400 mt-1">Pedido integrado → pagado (con incidencia: <?= $ticketPct === null ? '—' : number_format($ticketPct, 1, ',', '.') . ' %' ?>)</div>
                 </div>
 
                 <!-- Métrica 5: Incidencias abiertas vs cerradas -->
@@ -177,11 +178,12 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     <div class="text-xs text-slate-400 mt-1">Integradas con Bot de Telegram</div>
                 </div>
 
-                <!-- Métrica 6: Tiempo medio simulado de resolución -->
+                <!-- Métrica 6: Tiempo medio real de resolución (resolved_at − created_at) -->
                 <div class="card-glass rounded-xl p-4">
                     <div class="text-xs text-slate-400 font-medium uppercase">6. Tiempo Medio Resolución</div>
-                    <div class="text-3xl font-extrabold text-purple-400 mt-1"><?= $metrics['tickets']['avg_resolution_minutes'] ?: 0 ?> min</div>
-                    <div class="text-xs text-slate-400 mt-1">MTTR desde apertura hasta aprobación IA</div>
+                    <?php $mttr = $metrics['tickets']['avg_resolution_minutes']; ?>
+                    <div class="text-3xl font-extrabold text-purple-400 mt-1"><?= $mttr === null ? '—' : number_format($mttr, 1, ',', '.') . ' min' ?></div>
+                    <div class="text-xs text-slate-400 mt-1">Desde la apertura hasta la notificación confirmada<?= $mttr === null ? ' (sin incidencias resueltas)' : '' ?></div>
                 </div>
 
                 <!-- Métrica 7: Acciones propuestas por el Agente IA vs Aprobadas -->
@@ -248,25 +250,25 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                         </div>
                         <div class="space-y-2.5 mt-2">
                             <?php
+                            // Solo etapas con datos reales del Back-Office (pedidos integrados por n8n y sus incidencias)
                             $funnel = $metrics['conversion']['funnel'];
-                            $maxVal = max(1, $funnel['product.viewed'] ?? 1);
+                            $base = (int) $funnel['orders_integrated'];
                             $funnelSteps = [
-                                ['product.viewed', '1. Fichas vistas (product.viewed)', 'bg-slate-500'],
-                                ['cart.item_added', '2. Carrito añadido (cart.item_added)', 'bg-sky-500'],
-                                ['checkout.started', '3. Checkout iniciado (checkout.started)', 'bg-indigo-500'],
-                                ['order.created', '4. Pedido integrado en Back-Office (order.created)', 'bg-emerald-500'],
+                                ['orders_integrated', '1. Pedidos integrados en Back-Office', 'bg-sky-500'],
+                                ['orders_paid', '2. Pedidos pagados (Redsys sandbox)', 'bg-emerald-500'],
+                                ['orders_with_ticket', '3. Pedidos con incidencia postventa', 'bg-amber-500'],
                             ];
                             foreach ($funnelSteps as [$fKey, $fLabel, $barColor]):
                                 $val = (int) ($funnel[$fKey] ?? 0);
-                                $pct = min(100, round(($val / $maxVal) * 100, 1));
+                                $pct = $base > 0 ? min(100, round(($val / $base) * 100, 1)) : 0;
                             ?>
                                 <div>
                                     <div class="flex justify-between text-xs mb-1">
                                         <span class="text-slate-300"><?= $fLabel ?></span>
-                                        <span class="font-mono font-bold text-white"><?= $val ?> eventos (<?= $pct ?>%)</span>
+                                        <span class="font-mono font-bold text-white"><?= $val ?> pedidos<?= $base > 0 ? " ({$pct}%)" : '' ?></span>
                                     </div>
                                     <div class="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                                        <div class="h-full <?= $barColor ?>" style="width: <?= max(4, $pct) ?>%"></div>
+                                        <div class="h-full <?= $barColor ?>" style="width: <?= $pct ?>%"></div>
                                     </div>
                                 </div>
                             <?php endforeach; ?>
@@ -679,8 +681,9 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                         ✔️ <strong>Decisión humana registrada:</strong> Revisado por <strong><?= htmlspecialchars((string) $audit['reviewed_by']) ?></strong> el <?= htmlspecialchars((string) $audit['reviewed_at']) ?> —
                                         <em>"<?= htmlspecialchars((string) $audit['review_comment']) ?>"</em>
                                     </div>
-                                    <span class="font-mono text-[11px] <?= $audit['telegram_notified'] ? 'text-sky-400' : 'text-slate-500' ?>">
-                                        <?= $audit['telegram_notified'] ? '📲 Notificación enviada a Telegram Bot' : '🚫 Notificación a Telegram bloqueada' ?>
+                                    <?php $tgPending = !$audit['telegram_notified'] && $audit['final_status'] === 'aprobado'; ?>
+                                    <span class="font-mono text-[11px] <?= $audit['telegram_notified'] ? 'text-sky-400' : ($tgPending ? 'text-amber-400' : 'text-slate-500') ?>">
+                                        <?= $audit['telegram_notified'] ? '📲 n8n confirmó la notificación a Telegram' : ($tgPending ? '⚠️ Aprobada: notificación a Telegram no enviada' : '🚫 Sin notificación a Telegram') ?>
                                     </span>
                                 </div>
                             <?php endif; ?>

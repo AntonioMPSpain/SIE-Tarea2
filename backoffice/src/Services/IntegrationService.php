@@ -262,12 +262,6 @@ class IntegrationService
                         segment = CASE WHEN (total_spent + :amount) >= 50 THEN "VIP_PICANTE" ELSE segment END
                     WHERE id = :id
                 ')->execute([':amount' => $totalAmount, ':id' => $customerId]);
-
-                // Actualizar contadores de embudo (Funnel)
-                $this->incrementFunnelCounter('order.created', 1);
-                if ($paymentStatus === 'pagado_simulado') {
-                    $this->incrementFunnelCounter('payment.simulated', 1);
-                }
             }
 
             $this->db->commit();
@@ -559,7 +553,6 @@ class IntegrationService
                 ':status'      => 'EN_REVISION_IA',
                 ':created_at'  => $now,
             ]);
-            $this->incrementFunnelCounter('support.requested', 1);
         }
 
         $msg = "Incidencia {$ticketRef} registrada en Back-Office y vinculada al pedido " . ($orderRef ?? 'SIN_PEDIDO') . " en estado EN_REVISION_IA.";
@@ -812,25 +805,32 @@ class IntegrationService
                 'reviewed_by'              => $reviewerName,
                 'reviewed_at'              => $now,
             ]);
-            $telegramDispatched = 1;
+            // Solo se da por notificado si n8n confirma la recepción (HTTP 2xx)
+            $telegramDispatched = $webhookInfo['dispatched'] ? 1 : 0;
 
-            // Resolver ticket y calcular tiempo de resolución
             if ($ticket) {
-                $createdTs = strtotime((string) $ticket['created_at']);
-                $diffMinutes = max(12, (int) round((time() - $createdTs) / 60));
-                $this->db->prepare('
-                    UPDATE erp_tickets
-                    SET status = "RESUELTA",
-                        resolution_notes = :notes,
-                        resolved_at = :resolved_at,
-                        simulated_resolution_minutes = COALESCE(simulated_resolution_minutes, :mins)
-                    WHERE ticket_ref = :ref
-                ')->execute([
-                    ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Notificación enviada por Telegram.",
-                    ':resolved_at' => $now,
-                    ':mins'        => $diffMinutes,
-                    ':ref'         => $audit['ticket_ref'],
-                ]);
+                if ($telegramDispatched === 1) {
+                    // Incidencia resuelta: resolved_at real, el tiempo de resolución se calcula con él
+                    $this->db->prepare('
+                        UPDATE erp_tickets
+                        SET status = "RESUELTA", resolution_notes = :notes, resolved_at = :resolved_at
+                        WHERE ticket_ref = :ref
+                    ')->execute([
+                        ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. n8n confirmó la recepción para Telegram (HTTP {$webhookInfo['http_code']}).",
+                        ':resolved_at' => $now,
+                        ':ref'         => $audit['ticket_ref'],
+                    ]);
+                } else {
+                    // Aprobada pero sin notificar: no se marca como resuelta
+                    $this->db->prepare('
+                        UPDATE erp_tickets
+                        SET status = "APROBADA_PENDIENTE_NOTIFICACION", resolution_notes = :notes
+                        WHERE ticket_ref = :ref
+                    ')->execute([
+                        ':notes' => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. La notificación por Telegram NO se ha podido enviar: {$webhookInfo['note']}",
+                        ':ref'   => $audit['ticket_ref'],
+                    ]);
+                }
             }
 
             // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
@@ -871,6 +871,11 @@ class IntegrationService
         ]);
 
         $msg = "Supervisión humana registrada: Propuesta #{$auditId} ({$audit['ticket_ref']}) marcada como '" . strtoupper($normalizedDecision) . "' por {$reviewerName}.";
+        if ($normalizedDecision === 'aprobado') {
+            $msg .= $telegramDispatched === 1
+                ? ' Notificación entregada a n8n para Telegram.'
+                : ' ATENCIÓN: la notificación por Telegram no se ha podido enviar (queda pendiente).';
+        }
         $res = [
             'ok'                => true,
             'audit_id'          => $auditId,
@@ -895,6 +900,23 @@ class IntegrationService
             $res,
             $startTime
         );
+
+        // Constancia del fallo de notificación en el log (cuenta en «errores por tipo» del cuadro de mando)
+        if ($normalizedDecision === 'aprobado' && $telegramDispatched === 0 && $webhookInfo !== null) {
+            $this->logExecution(
+                'exec_tg_' . bin2hex(random_bytes(4)),
+                'ESCENARIO_3_SUPERVISION_HUMANA',
+                'ai.proposal.approved',
+                'BackOffice -> n8n -> Telegram',
+                $audit['ticket_ref'],
+                'ERROR',
+                'ERR_NOTIFICACION_TELEGRAM',
+                'No se pudo entregar a n8n la notificación de Telegram: ' . $webhookInfo['note'],
+                ['audit_id' => $auditId],
+                $webhookInfo,
+                $startTime
+            );
+        }
 
         return $res;
     }
@@ -944,12 +966,13 @@ class IntegrationService
             ORDER BY total DESC
         ')->fetchAll();
 
-        // e. Incidencias abiertas vs cerradas y f. Tiempo medio simulado de resolución
+        // e. Incidencias abiertas vs cerradas y f. Tiempo medio de resolución REAL (resolved_at − created_at, sin mínimos)
         $ticketStats = $this->db->query('
             SELECT COUNT(*) AS total_tickets,
                    SUM(CASE WHEN status != "RESUELTA" THEN 1 ELSE 0 END) AS open_tickets,
                    SUM(CASE WHEN status = "RESUELTA" THEN 1 ELSE 0 END) AS resolved_tickets,
-                   ROUND(AVG(CASE WHEN simulated_resolution_minutes IS NOT NULL THEN simulated_resolution_minutes END), 1) AS avg_resolution_minutes
+                   ROUND(AVG(CASE WHEN resolved_at IS NOT NULL
+                                  THEN (julianday(resolved_at) - julianday(created_at)) * 1440 END), 1) AS avg_resolution_minutes
             FROM erp_tickets
         ')->fetch();
 
@@ -972,19 +995,26 @@ class IntegrationService
             ORDER BY total DESC
         ')->fetchAll();
 
-        // h. Tasa de conversión del flujo definido (Funnel desde product.viewed -> order.created)
-        $funnelRows = $this->db->query('SELECT event_name, event_label, total_count FROM erp_funnel_counters')->fetchAll();
-        $funnelMap = [];
-        foreach ($funnelRows as $r) {
-            $funnelMap[$r['event_name']] = (int) $r['total_count'];
-        }
-        $views = max(1, $funnelMap['product.viewed'] ?? 1);
-        $checkouts = max(1, $funnelMap['checkout.started'] ?? 1);
-        $ordersCreated = $funnelMap['order.created'] ?? (int) ($ordTotals['total_orders'] ?? 0);
-        $paymentsDone = $funnelMap['payment.simulated'] ?? $ordersCreated;
+        // h. Tasa de conversión del flujo definido. Solo etapas que el Back-Office recibe de verdad
+        //    (no recibe product.viewed, cart.item_added ni checkout.started): todo sale de las tablas, sin contadores ni mínimos.
+        $funnelRow = $this->db->query('
+            SELECT (SELECT COUNT(*) FROM erp_orders) AS orders_integrated,
+                   (SELECT COUNT(*) FROM erp_orders WHERE payment_status = "pagado_simulado") AS orders_paid,
+                   (SELECT COUNT(DISTINCT t.order_ref) FROM erp_tickets t
+                      JOIN erp_orders o ON o.order_ref = t.order_ref) AS orders_with_ticket
+        ')->fetch();
+        $ordersIntegrated = (int) ($funnelRow['orders_integrated'] ?? 0);
+        $ordersPaid = (int) ($funnelRow['orders_paid'] ?? 0);
+        $ordersWithTicket = (int) ($funnelRow['orders_with_ticket'] ?? 0);
 
-        $globalConversionRate = round(($ordersCreated / $views) * 100, 2);
-        $checkoutToOrderRate = round(($paymentsDone / $checkouts) * 100, 2);
+        $funnel = [
+            'orders_integrated'  => $ordersIntegrated,
+            'orders_paid'        => $ordersPaid,
+            'orders_with_ticket' => $ordersWithTicket,
+        ];
+        // Sin datos no hay tasa (null), en lugar de inventar un denominador
+        $paidRate = $ordersIntegrated > 0 ? round($ordersPaid / $ordersIntegrated * 100, 2) : null;
+        $ticketRate = $ordersPaid > 0 ? round($ordersWithTicket / $ordersPaid * 100, 2) : null;
 
         // j. Acciones propuestas por el agente y acciones aprobadas
         $aiStats = $this->db->query('
@@ -1013,7 +1043,8 @@ class IntegrationService
                 'total'                  => (int) ($ticketStats['total_tickets'] ?? 0),
                 'open'                   => (int) ($ticketStats['open_tickets'] ?? 0),
                 'resolved'               => (int) ($ticketStats['resolved_tickets'] ?? 0),
-                'avg_resolution_minutes' => (float) ($ticketStats['avg_resolution_minutes'] ?? 0.0),
+                // null si todavía no hay ninguna incidencia resuelta
+                'avg_resolution_minutes' => $ticketStats['avg_resolution_minutes'] !== null ? (float) $ticketStats['avg_resolution_minutes'] : null,
             ],
             'integration' => [
                 'total_events'   => (int) ($logStats['total_events'] ?? 0),
@@ -1023,9 +1054,9 @@ class IntegrationService
                 'errors_by_type' => $errorsByType,
             ],
             'conversion' => [
-                'funnel'                 => $funnelMap,
-                'global_conversion_pct'  => $globalConversionRate,
-                'checkout_to_paid_pct'   => $checkoutToOrderRate,
+                'funnel'                  => $funnel,
+                'integrated_to_paid_pct'  => $paidRate,
+                'paid_with_ticket_pct'    => $ticketRate,
             ],
             'ai_agent' => [
                 'total_proposals'    => (int) ($aiStats['total_proposals'] ?? 0),
@@ -1037,32 +1068,6 @@ class IntegrationService
                 'low_stock_alerts' => $lowStockCount,
             ],
         ];
-    }
-
-    public function incrementFunnelCounter(string $eventName, int $delta = 1): void
-    {
-        $labels = [
-            'product.viewed'    => 'Fichas de producto vistas (product.viewed)',
-            'cart.item_added'   => 'Productos añadidos al carrito (cart.item_added)',
-            'checkout.started'  => 'Checkouts iniciados (checkout.started)',
-            'order.created'     => 'Pedidos creados e integrados (order.created)',
-            'payment.simulated' => 'Pagos confirmados Redsys/Simulado (payment.simulated)',
-            'support.requested' => 'Incidencias postventa (support.requested)',
-        ];
-        $label = $labels[$eventName] ?? $eventName;
-        $now = date('Y-m-d H:i:s');
-
-        $stmt = $this->db->prepare('SELECT total_count FROM erp_funnel_counters WHERE event_name = :name LIMIT 1');
-        $stmt->execute([':name' => $eventName]);
-        $row = $stmt->fetch();
-
-        if ($row) {
-            $this->db->prepare('UPDATE erp_funnel_counters SET total_count = total_count + :d, updated_at = :u WHERE event_name = :n')
-                ->execute([':d' => $delta, ':u' => $now, ':n' => $eventName]);
-        } else {
-            $this->db->prepare('INSERT INTO erp_funnel_counters (event_name, event_label, total_count, updated_at) VALUES (:n, :l, :c, :u)')
-                ->execute([':n' => $eventName, ':l' => $label, ':c' => max(0, $delta), ':u' => $now]);
-        }
     }
 
     private function logExecution(

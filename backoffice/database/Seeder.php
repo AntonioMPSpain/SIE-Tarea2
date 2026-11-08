@@ -42,7 +42,6 @@ class Seeder
         $db->exec('DELETE FROM erp_tickets;');
         $db->exec('DELETE FROM erp_ai_audits;');
         $db->exec('DELETE FROM erp_integration_logs;');
-        $db->exec('DELETE FROM erp_funnel_counters;');
         $db->exec('DELETE FROM erp_inventory;');
 
         self::seedInventoryOnly($db);
@@ -76,20 +75,6 @@ class Seeder
                 ':loc'       => $row[8],
                 ':updated'   => $now,
             ]);
-        }
-
-        // Inicializar contadores de embudo base a 0
-        $events = [
-            'product.viewed'    => 'Fichas de producto vistas (product.viewed)',
-            'cart.item_added'   => 'Productos añadidos al carrito (cart.item_added)',
-            'checkout.started'  => 'Checkouts iniciados (checkout.started)',
-            'order.created'     => 'Pedidos creados e integrados (order.created)',
-            'payment.simulated' => 'Pagos confirmados Redsys/Simulado (payment.simulated)',
-            'support.requested' => 'Incidencias postventa (support.requested)',
-        ];
-        $insFunnel = $db->prepare('INSERT OR REPLACE INTO erp_funnel_counters (event_name, event_label, total_count, updated_at) VALUES (:n, :l, 0, :u)');
-        foreach ($events as $k => $label) {
-            $insFunnel->execute([':n' => $k, ':l' => $label, ':u' => $now]);
         }
     }
 }
