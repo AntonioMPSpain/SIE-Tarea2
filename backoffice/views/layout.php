@@ -1,7 +1,7 @@
 <?php
 /**
  * Vista principal del Sistema de Back-Office ERP & Cuadro de Mando Operativo — Piquantum (Tarea 2)
- * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs
+ * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs, $currentUser
  */
 $pendingAuditsCount = (int) ($metrics['ai_agent']['pending_proposals'] ?? 0);
 $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
@@ -87,6 +87,16 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     </a>
                 <?php endforeach; ?>
             </nav>
+
+            <!-- SESIÓN DEL OPERADOR -->
+            <div class="flex items-center gap-2 text-xs text-slate-400">
+                <span>👤 <?= htmlspecialchars((string) ($currentUser['email'] ?? '')) ?></span>
+                <form method="POST" action="/logout" class="inline">
+                    <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-medium transition">
+                        Cerrar sesión
+                    </button>
+                </form>
+            </div>
         </div>
     </header>
 

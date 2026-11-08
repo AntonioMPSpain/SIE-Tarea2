@@ -17,6 +17,17 @@ class WebController
     public function __construct()
     {
         if (session_status() === PHP_SESSION_NONE) {
+            // Cookie de sesión no accesible desde JavaScript, no enviada desde otros sitios en POST
+            // y solo por HTTPS cuando la web va detrás de HTTPS (Caddy en el servidor).
+            $isHttps = ($_SERVER['HTTPS'] ?? '') === 'on' || ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https';
+            ini_set('session.use_strict_mode', '1');
+            session_name('PQBO_SESSION');
+            session_set_cookie_params([
+                'path'     => '/',
+                'httponly' => true,
+                'samesite' => 'Lax',
+                'secure'   => $isHttps,
+            ]);
             session_start();
         }
         $this->db = Database::getConnection();
@@ -34,6 +45,25 @@ class WebController
 
     public function handle(string $method, string $uri): void
     {
+        // Rutas públicas: solo el inicio de sesión
+        if ($uri === '/login') {
+            if ($method === 'POST') {
+                $this->login();
+            } else {
+                $this->showLogin();
+            }
+            return;
+        }
+
+        // Todo lo demás exige sesión iniciada
+        if ($this->currentUser() === null) {
+            $this->redirect('/login');
+        }
+
+        if ($method === 'POST' && $uri === '/logout') {
+            $this->logout();
+        }
+
         // Procesar acciones POST desde formularios del Back-Office
         if ($method === 'POST') {
             $action = (string) ($_POST['action'] ?? '');
@@ -60,6 +90,8 @@ class WebController
         $tickets   = $this->db->query('SELECT * FROM erp_tickets ORDER BY id DESC')->fetchAll();
         $audits    = $this->db->query('SELECT * FROM erp_ai_audits ORDER BY id DESC')->fetchAll();
         $logs      = $this->db->query('SELECT * FROM erp_integration_logs ORDER BY id DESC LIMIT 50')->fetchAll();
+
+        $currentUser = $this->currentUser();
 
         require dirname(__DIR__, 2) . '/views/layout.php';
     }
@@ -169,6 +201,72 @@ class WebController
             default:
                 $this->redirect('/');
         }
+    }
+
+    // =========================================================================
+    // ACCESO DEL OPERADOR (inicio y cierre de sesión)
+    // =========================================================================
+
+    /** Usuario con sesión iniciada, o null si no hay sesión. */
+    private function currentUser(): ?array
+    {
+        $user = $_SESSION['user'] ?? null;
+        return is_array($user) ? $user : null;
+    }
+
+    private function showLogin(?string $error = null, string $email = '', int $status = 200): void
+    {
+        if ($this->currentUser() !== null) {
+            $this->redirect('/');
+        }
+        http_response_code($status);
+        require dirname(__DIR__, 2) . '/views/login.php';
+    }
+
+    private function login(): void
+    {
+        $email    = trim((string) ($_POST['email'] ?? ''));
+        $password = (string) ($_POST['password'] ?? '');
+
+        $adminEmail = trim((string) Database::env('ERP_ADMIN_EMAIL', ''));
+        $adminHash  = (string) Database::env('ERP_ADMIN_PASSWORD_HASH', '');
+
+        // Sin credenciales configuradas no se puede entrar (nunca hay una contraseña por defecto).
+        if ($adminEmail === '' || $adminHash === '') {
+            $this->showLogin('El acceso no está configurado en el servidor (ERP_ADMIN_EMAIL / ERP_ADMIN_PASSWORD_HASH).', $email, 500);
+            return;
+        }
+
+        // Se comprueban las dos cosas siempre, para no revelar si el email existe por el tiempo de respuesta.
+        $emailOk    = hash_equals(strtolower($adminEmail), strtolower($email));
+        $passwordOk = password_verify($password, $adminHash);
+
+        if (!$emailOk || !$passwordOk) {
+            $this->showLogin('Email o contraseña incorrectos.', $email, 401);
+            return;
+        }
+
+        // Nuevo identificador de sesión al entrar: evita la fijación de sesión.
+        session_regenerate_id(true);
+        $_SESSION['user'] = ['email' => $adminEmail];
+
+        $this->redirect('/');
+    }
+
+    private function logout(): void
+    {
+        $_SESSION = [];
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', [
+            'expires'  => time() - 3600,
+            'path'     => $params['path'],
+            'secure'   => $params['secure'],
+            'httponly' => $params['httponly'],
+            'samesite' => $params['samesite'],
+        ]);
+        session_destroy();
+
+        $this->redirect('/login');
     }
 
     private function redirect(string $url): void
