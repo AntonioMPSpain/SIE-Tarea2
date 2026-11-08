@@ -16,7 +16,8 @@ class WebhookNotifier
     public static function dispatch(string $targetUrlEnvKey, string $eventType, array $data): array
     {
         $url = (string) Database::env($targetUrlEnvKey, '');
-        $secret = (string) Database::env('WEBHOOK_HMAC_SECRET', 'pq_hmac_academic_secret_2026');
+        // Sin valor por defecto: sin secreto no se firma ni se envía nada
+        $secret = (string) Database::secret('WEBHOOK_HMAC_SECRET');
 
         $envelope = [
             'event_id'    => 'evt_bo_' . bin2hex(random_bytes(6)),
@@ -29,12 +30,14 @@ class WebhookNotifier
         $jsonPayload = json_encode($envelope, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $signature = hash_hmac('sha256', (string) $jsonPayload, $secret);
 
-        if ($url === '' || !function_exists('curl_init')) {
+        if ($url === '' || $secret === '' || !function_exists('curl_init')) {
             return [
                 'dispatched' => false,
                 'target_url' => $url ?: 'no_configurada',
                 'http_code'  => 0,
-                'note'       => 'Webhook registrado como evento pendiente de sincronización (URL n8n no activa).',
+                'note'       => $secret === ''
+                    ? 'No enviado: falta WEBHOOK_HMAC_SECRET para firmar el webhook.'
+                    : 'Webhook registrado como evento pendiente de sincronización (URL n8n no activa).',
                 'envelope'   => $envelope,
             ];
         }

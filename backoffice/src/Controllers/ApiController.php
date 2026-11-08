@@ -33,7 +33,7 @@ class ApiController
 
         // El resto de rutas exige el token de integración, solo por cabecera X-Integration-Token.
         // Sin valor por defecto: si el servidor no lo tiene configurado, la API no se abre.
-        $expectedToken = (string) Database::env('INTEGRATION_API_KEY', '');
+        $expectedToken = (string) Database::secret('INTEGRATION_API_KEY');
         if ($expectedToken === '') {
             $this->jsonResponse(500, [
                 'ok'         => false,

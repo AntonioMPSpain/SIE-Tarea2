@@ -795,7 +795,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 <!-- Especificación de Endpoints API para n8n y Agente IA -->
                 <div class="card-glass rounded-xl p-5 space-y-4">
                     <h2 class="text-base font-bold text-white">📑 Contratos de Integración API REST (Para n8n y Tools del Agente IA)</h2>
-                    <p class="text-xs text-slate-400">Cabecera opcional de seguridad: <code class="text-amber-300">X-Integration-Token: pq_bo_academic_token_2026_test</code></p>
+                    <p class="text-xs text-slate-400">Cabecera obligatoria en todas las rutas salvo <code>/api/v1/health</code>: <code class="text-amber-300">X-Integration-Token: &lt;INTEGRATION_API_KEY del .env&gt;</code></p>
 
                     <div class="space-y-3 text-xs">
                         <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">

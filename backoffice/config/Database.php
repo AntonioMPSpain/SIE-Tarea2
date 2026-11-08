@@ -12,17 +12,28 @@ class Database
     /** Versión de database/schema.sql (PRAGMA user_version). Subirla en cada cambio del esquema. */
     public const SCHEMA_VERSION = 3;
 
+    /** Secretos sin los que la aplicación no arranca (ni con un valor por defecto ni con el de .env.example). */
+    public const REQUIRED_SECRETS = ['INTEGRATION_API_KEY', 'WEBHOOK_HMAC_SECRET'];
+
+    /** Valor de ejemplo de .env.example: se trata como «sin configurar». */
+    private const PLACEHOLDER = 'cambia-esto';
+
     private static ?PDO $pdo = null;
     private static array $env = [];
+    private static bool $envLoaded = false;
 
+    /**
+     * Carga las variables de backoffice/.env. Solo de .env (o de las variables de entorno del sistema):
+     * .env.example es una plantilla publicada en el repositorio y nunca se usa como configuración.
+     */
     public static function loadEnv(): void
     {
-        if (!empty(self::$env)) {
+        if (self::$envLoaded) {
             return;
         }
+        self::$envLoaded = true;
 
-        $baseDir = dirname(__DIR__);
-        $envFile = file_exists($baseDir . '/.env') ? $baseDir . '/.env' : $baseDir . '/.env.example';
+        $envFile = dirname(__DIR__) . '/.env';
 
         if (file_exists($envFile)) {
             $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -49,6 +60,19 @@ class Database
             return $sysVal;
         }
         return self::$env[$key] ?? $default;
+    }
+
+    /** Secreto configurado, o null si falta o sigue con el valor de ejemplo «cambia-esto». */
+    public static function secret(string $key): ?string
+    {
+        $value = trim((string) self::env($key, ''));
+        return ($value === '' || strtolower($value) === self::PLACEHOLDER) ? null : $value;
+    }
+
+    /** Secretos obligatorios que faltan (o tienen el valor de ejemplo). Vacío si está todo configurado. */
+    public static function missingRequiredSecrets(): array
+    {
+        return array_values(array_filter(self::REQUIRED_SECRETS, fn (string $key) => self::secret($key) === null));
     }
 
     public static function getConnection(): PDO
