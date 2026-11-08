@@ -123,11 +123,13 @@ class ApiController
         if ($method === 'POST' && $uri === '/api/v1/agent/reviews') {
             $payload = $this->readJsonBody();
             $auditId = (int) ($payload['audit_id'] ?? 0);
-            $decision = (string) ($payload['decision'] ?? 'aprobado');
-            $reviewer = (string) ($payload['reviewed_by'] ?? 'Supervisor Telegram (Human-in-the-loop)');
-            $comment  = (string) ($payload['comment'] ?? 'Revisado desde callback de supervisión en Telegram.');
+            // Sin valores por defecto: sin decision o sin reviewed_by, la revisión se rechaza (422)
+            $decision = (string) ($payload['decision'] ?? '');
+            $reviewer = (string) ($payload['reviewed_by'] ?? '');
+            $comment  = (string) ($payload['comment'] ?? '');
             $result = $this->service->reviewAgentProposal($auditId, $decision, $reviewer, $comment);
-            $this->jsonResponse($result['ok'] ? 200 : 404, $result);
+            $status = $result['ok'] ? 200 : (($result['error_code'] ?? '') === 'ERR_ENTIDAD_NO_ENCONTRADA' ? 404 : 422);
+            $this->jsonResponse($status, $result);
             return;
         }
 

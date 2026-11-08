@@ -10,7 +10,7 @@ use PDOException;
 class Database
 {
     /** Versión de database/schema.sql (PRAGMA user_version). Subirla en cada cambio del esquema. */
-    public const SCHEMA_VERSION = 2;
+    public const SCHEMA_VERSION = 3;
 
     private static ?PDO $pdo = null;
     private static array $env = [];

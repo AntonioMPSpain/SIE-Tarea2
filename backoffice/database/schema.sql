@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS erp_orders (
     shipping_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     discount_code VARCHAR(50) NULL,
     total_amount DECIMAL(10,2) NOT NULL,
-    payment_method VARCHAR(50) NOT NULL DEFAULT 'redsys_sandbox',
+    payment_method VARCHAR(50) NULL,
     payment_status VARCHAR(40) NOT NULL DEFAULT 'pagado_simulado',
     order_status VARCHAR(40) NOT NULL DEFAULT 'pendiente_preparacion',
     priority VARCHAR(30) NOT NULL DEFAULT 'NORMAL',
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS erp_ai_audits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_ref VARCHAR(64) NOT NULL,
     order_ref VARCHAR(64) NULL,
-    agent_model VARCHAR(80) NOT NULL DEFAULT 'gemini-2.5-flash (n8n AI Agent)',
+    agent_model VARCHAR(80) NULL,
     tools_invoked TEXT NOT NULL,
     -- Los 7 campos obligatorios de la salida estructurada (Apartado 6)
     detected_case_type VARCHAR(100) NOT NULL,
@@ -125,4 +125,4 @@ CREATE TABLE IF NOT EXISTS erp_integration_logs (
 );
 
 -- Versión del esquema: Database::SCHEMA_VERSION debe coincidir (si no, hay que recrear la base de datos)
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

@@ -156,7 +156,7 @@ class WebController
 
             case 'review_ai_proposal':
                 $auditId  = (int) ($_POST['audit_id'] ?? 0);
-                $decision = (string) ($_POST['decision'] ?? 'aprobado');
+                $decision = (string) ($_POST['decision'] ?? '');
                 // El revisor es siempre el operador con sesión iniciada, nunca un dato que llegue del formulario.
                 $reviewer = (string) ($this->currentUser()['email'] ?? '');
                 $comment  = trim((string) ($_POST['review_comment'] ?? ''));

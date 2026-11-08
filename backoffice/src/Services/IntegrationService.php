@@ -26,13 +26,33 @@ class IntegrationService
         $executionId = $payload['execution_id'] ?? ('exec_' . bin2hex(random_bytes(5)));
         $eventType = (string) ($payload['event_type'] ?? 'order.created');
 
-        // 1. Validación estricta de campos obligatorios (Apartado 3.b y 4.b)
+        // Catálogo de estados del contrato y su normalización (Apartado 3.c)
+        $statusMap = [
+            'created'               => 'creado',
+            'creado'                => 'creado',
+            'paid'                  => 'pendiente_preparacion',
+            'pagado_simulado'       => 'pendiente_preparacion',
+            'pendiente_preparacion' => 'pendiente_preparacion',
+            'shipped'               => 'enviado',
+            'enviado'               => 'enviado',
+            'cancelled'             => 'cancelado',
+            'cancelado'             => 'cancelado',
+            'incidencia'            => 'incidencia',
+        ];
+
+        // 1. Validación estricta de campos obligatorios (Apartado 3.b y 4.b).
+        //    Nada se rellena con valores inventados: si falta un obligatorio, se rechaza; los opcionales quedan a NULL.
         $missingFields = [];
         $orderRef = trim((string) ($payload['order_ref'] ?? ''));
-        $customerEmail = trim((string) ($payload['customer']['email'] ?? ''));
-        $customerName = trim((string) ($payload['customer']['name'] ?? ''));
+        $customer = is_array($payload['customer'] ?? null) ? $payload['customer'] : [];
+        $customerEmail = trim((string) ($customer['email'] ?? ''));
+        $customerName = trim((string) ($customer['name'] ?? ''));
         $items = $payload['items'] ?? [];
-        $totalAmount = isset($payload['total_amount']) ? (float) $payload['total_amount'] : -1.0;
+        $rawStatus = strtolower(trim((string) ($payload['status'] ?? '')));
+        $occurredAtRaw = trim((string) ($payload['occurred_at'] ?? ''));
+        $occurredTs = $occurredAtRaw !== '' ? strtotime($occurredAtRaw) : false;
+        $totalAmount = $this->numberOrNull($payload['total_amount'] ?? null);
+        $shippingAmount = $this->numberOrNull($payload['shipping_amount'] ?? null);
 
         if ($orderRef === '') {
             $missingFields[] = 'order_ref';
@@ -43,18 +63,39 @@ class IntegrationService
         if ($customerName === '') {
             $missingFields[] = 'customer.name';
         }
+        if (!isset($statusMap[$rawStatus])) {
+            $missingFields[] = 'status (valores admitidos: ' . implode(', ', array_keys($statusMap)) . ')';
+        }
+        if ($occurredTs === false) {
+            $missingFields[] = 'occurred_at (fecha ISO 8601)';
+        }
+        if ($shippingAmount === null || $shippingAmount < 0) {
+            $missingFields[] = 'shipping_amount (número >= 0)';
+        }
         if (!is_array($items) || count($items) === 0) {
             $missingFields[] = 'items[] (mínimo 1 línea de pedido)';
         }
-        if ($totalAmount <= 0) {
+        if ($totalAmount === null || $totalAmount <= 0) {
             $missingFields[] = 'total_amount (debe ser > 0)';
         }
 
         // Validar estructura de cada línea de pedido
         if (is_array($items)) {
             foreach ($items as $idx => $item) {
-                if (empty($item['sku']) || empty($item['quantity']) || (int) $item['quantity'] <= 0) {
-                    $missingFields[] = "items[{$idx}].sku / quantity";
+                $item = is_array($item) ? $item : [];
+                if (trim((string) ($item['sku'] ?? '')) === '') {
+                    $missingFields[] = "items[{$idx}].sku";
+                }
+                if (trim((string) ($item['product_name'] ?? '')) === '') {
+                    $missingFields[] = "items[{$idx}].product_name";
+                }
+                $qty = $item['quantity'] ?? null;
+                if (!is_int($qty) && !(is_string($qty) && ctype_digit($qty)) || (int) $qty <= 0) {
+                    $missingFields[] = "items[{$idx}].quantity (entero > 0)";
+                }
+                $price = $this->numberOrNull($item['unit_price'] ?? null);
+                if ($price === null || $price <= 0) {
+                    $missingFields[] = "items[{$idx}].unit_price (número > 0)";
                 }
             }
         }
@@ -66,11 +107,12 @@ class IntegrationService
 
             $validationMsg = 'Validación rechazada. Campos obligatorios ausentes o inválidos: ' . implode(', ', $missingFields);
             $response = [
-                'ok'           => false,
-                'execution_id' => $executionId,
-                'scenario'     => 'ESCENARIO_1_PEDIDO',
-                'error_code'   => $errorType,
-                'message'      => $validationMsg,
+                'ok'             => false,
+                'execution_id'   => $executionId,
+                'scenario'       => 'ESCENARIO_1_PEDIDO',
+                'error_code'     => $errorType,
+                'invalid_fields' => $missingFields,
+                'message'        => $validationMsg,
             ];
 
             $this->logExecution(
@@ -91,25 +133,11 @@ class IntegrationService
         }
 
         // 2. Transformación / Normalización de estados y datos (Apartado 3.c)
-        $rawStatus = strtolower(trim((string) ($payload['status'] ?? 'pagado_simulado')));
-        $statusMap = [
-            'created'               => 'creado',
-            'creado'                => 'creado',
-            'paid'                  => 'pendiente_preparacion',
-            'pagado_simulado'       => 'pendiente_preparacion',
-            'pendiente_preparacion' => 'pendiente_preparacion',
-            'shipped'               => 'enviado',
-            'enviado'               => 'enviado',
-            'cancelled'             => 'cancelado',
-            'cancelado'             => 'cancelado',
-            'incidencia'            => 'incidencia',
-        ];
-        $normalizedOrderStatus = $statusMap[$rawStatus] ?? 'pendiente_preparacion';
-        $paymentStatus = ($rawStatus === 'creado') ? 'pendiente_pago' : 'pagado_simulado';
-        $now = (string) ($payload['occurred_at'] ?? date('Y-m-d H:i:s'));
-        if (str_contains($now, 'T')) {
-            $now = date('Y-m-d H:i:s', strtotime($now));
-        }
+        $normalizedOrderStatus = $statusMap[$rawStatus];
+        $paymentStatus = $this->paymentStatusFor($normalizedOrderStatus);
+        $now = date('Y-m-d H:i:s', (int) $occurredTs);
+        $customerPhone = $this->stringOrNull($customer['phone'] ?? null);
+        $shippingAddress = $this->stringOrNull($payload['shipping_address'] ?? ($customer['address'] ?? null));
 
         try {
             $this->db->beginTransaction();
@@ -131,8 +159,8 @@ class IntegrationService
                 ');
                 $updCust->execute([
                     ':name'       => $customerName,
-                    ':phone'      => $payload['customer']['phone'] ?? null,
-                    ':address'    => $payload['shipping_address'] ?? ($payload['customer']['address'] ?? null),
+                    ':phone'      => $customerPhone,
+                    ':address'    => $shippingAddress,
                     ':updated_at' => $now,
                     ':id'         => $customerId,
                 ]);
@@ -142,11 +170,11 @@ class IntegrationService
                     VALUES (:ext_id, :name, :email, :phone, :address, :segment, 0, 0.00, :created_at, :updated_at)
                 ');
                 $insCust->execute([
-                    ':ext_id'     => (string) ($payload['customer']['id'] ?? 'CUST-' . random_int(100, 999)),
+                    ':ext_id'     => $this->stringOrNull($customer['id'] ?? null),
                     ':name'       => $customerName,
                     ':email'      => strtolower($customerEmail),
-                    ':phone'      => $payload['customer']['phone'] ?? '+34 600 000 000',
-                    ':address'    => $payload['shipping_address'] ?? ($payload['customer']['address'] ?? 'Calle Académica 12, Murcia'),
+                    ':phone'      => $customerPhone,
+                    ':address'    => $shippingAddress,
                     ':segment'    => $totalAmount >= 45 ? 'VIP_PICANTE' : 'ESTANDAR',
                     ':created_at' => $now,
                     ':updated_at' => $now,
@@ -182,7 +210,7 @@ class IntegrationService
                 // Calcular desglose de IVA (21% incluido como en Piquantum Tarea 1)
                 $subtotal = round($totalAmount / 1.21, 2);
                 $tax = round($totalAmount - $subtotal, 2);
-                $shipping = isset($payload['shipping_amount']) ? (float) $payload['shipping_amount'] : ($totalAmount >= 60 ? 0.00 : 4.95);
+                $shipping = $shippingAmount;
 
                 $insOrd = $this->db->prepare('
                     INSERT INTO erp_orders (
@@ -202,13 +230,13 @@ class IntegrationService
                     ':customer_id'        => $customerId,
                     ':customer_name'      => $customerName,
                     ':customer_email'     => strtolower($customerEmail),
-                    ':shipping_address'   => $payload['shipping_address'] ?? ($payload['customer']['address'] ?? 'Calle Mayor 14, 30001 Murcia'),
+                    ':shipping_address'   => $shippingAddress,
                     ':subtotal'           => $subtotal,
                     ':tax'                => $tax,
                     ':shipping'           => $shipping,
-                    ':discount_code'      => $payload['discount_code'] ?? null,
+                    ':discount_code'      => $this->stringOrNull($payload['discount_code'] ?? null),
                     ':total'              => $totalAmount,
-                    ':payment_method'     => $payload['payment_method'] ?? 'redsys_sandbox',
+                    ':payment_method'     => $this->stringOrNull($payload['payment_method'] ?? null),
                     ':payment_status'     => $paymentStatus,
                     ':order_status'       => $normalizedOrderStatus,
                     ':priority'           => $totalAmount >= 50 ? 'ALTA' : 'NORMAL',
@@ -233,15 +261,15 @@ class IntegrationService
 
                 foreach ($items as $item) {
                     $qty = (int) $item['quantity'];
-                    $unitPrice = (float) ($item['unit_price'] ?? 8.50);
+                    $unitPrice = (float) $item['unit_price'];
                     $lineTotal = round($qty * $unitPrice, 2);
                     $sku = strtoupper(trim((string) $item['sku']));
 
                     $insItem->execute([
                         ':order_id'     => $orderId,
                         ':sku'          => $sku,
-                        ':product_name' => (string) ($item['product_name'] ?? $sku),
-                        ':variant_size' => (string) ($item['variant_size'] ?? '100ml'),
+                        ':product_name' => trim((string) $item['product_name']),
+                        ':variant_size' => $this->stringOrNull($item['variant_size'] ?? null),
                         ':quantity'     => $qty,
                         ':unit_price'   => $unitPrice,
                         ':line_total'   => $lineTotal,
@@ -485,15 +513,22 @@ class IntegrationService
         $executionId = $payload['execution_id'] ?? ('exec_inc_' . bin2hex(random_bytes(4)));
         $eventType = (string) ($payload['event_type'] ?? 'support.requested');
 
-        $ticketRef = trim((string) ($payload['ticket_ref'] ?? ('INC-' . date('Ymd') . '-' . random_int(1000, 9999))));
-        $orderRef = !empty($payload['order_ref']) ? trim((string) $payload['order_ref']) : null;
+        // Sin valores inventados: ticket_ref y customer_name son obligatorios (ni aleatorios ni genéricos)
+        $ticketRef = trim((string) ($payload['ticket_ref'] ?? ''));
+        $orderRef = $this->stringOrNull($payload['order_ref'] ?? null);
         $customerEmail = trim((string) ($payload['customer_email'] ?? ($payload['customer']['email'] ?? '')));
-        $customerName = trim((string) ($payload['customer_name'] ?? ($payload['customer']['name'] ?? 'Cliente Piquantum')));
+        $customerName = trim((string) ($payload['customer_name'] ?? ($payload['customer']['name'] ?? '')));
         $subject = trim((string) ($payload['subject'] ?? ''));
         $description = trim((string) ($payload['description'] ?? ''));
         $telegramChatId = trim((string) ($payload['telegram_chat_id'] ?? '@laura_cliente_test'));
 
         $missing = [];
+        if ($ticketRef === '') {
+            $missing[] = 'ticket_ref';
+        }
+        if ($customerName === '') {
+            $missing[] = 'customer_name';
+        }
         if ($customerEmail === '' || !filter_var($customerEmail, FILTER_VALIDATE_EMAIL)) {
             $missing[] = 'customer_email';
         }
@@ -506,8 +541,8 @@ class IntegrationService
 
         if (!empty($missing)) {
             $msg = 'Incidencia rechazada por datos incompletos: ' . implode(', ', $missing);
-            $res = ['ok' => false, 'error_code' => 'ERR_CAMPOS_OBLIGATORIOS', 'message' => $msg];
-            $this->logExecution($executionId, 'ESCENARIO_3_POSTVENTA', $eventType, $direction, $ticketRef, 'ERROR', 'ERR_CAMPOS_OBLIGATORIOS', $msg, $payload, $res, $startTime);
+            $res = ['ok' => false, 'error_code' => 'ERR_CAMPOS_OBLIGATORIOS', 'invalid_fields' => $missing, 'message' => $msg];
+            $this->logExecution($executionId, 'ESCENARIO_3_POSTVENTA', $eventType, $direction, $ticketRef ?: 'SIN_REFERENCIA', 'ERROR', 'ERR_CAMPOS_OBLIGATORIOS', $msg, $payload, $res, $startTime);
             return $res;
         }
 
@@ -690,10 +725,21 @@ class IntegrationService
         if ($ticketRef === '') {
             $missing[] = 'ticket_ref';
         }
+        // Tampoco se inventan el mensaje que se enviará al cliente ni las herramientas que dice haber usado el agente
+        if (trim((string) ($payload['mensaje_propuesto_telegram'] ?? '')) === '') {
+            $missing[] = 'mensaje_propuesto_telegram';
+        }
+        $toolsRaw = $payload['herramientas_utilizadas'] ?? null;
+        $toolsList = is_array($toolsRaw)
+            ? array_values(array_filter(array_map(fn ($t) => trim((string) $t), $toolsRaw), fn ($t) => $t !== ''))
+            : array_values(array_filter(array_map('trim', explode(',', (string) $toolsRaw)), fn ($t) => $t !== ''));
+        if (count($toolsList) === 0) {
+            $missing[] = 'herramientas_utilizadas';
+        }
 
         if (!empty($missing)) {
             $msg = 'Propuesta del Agente IA rechazada por incumplir el contrato de salida estructurada. Faltan: ' . implode(', ', $missing);
-            $res = ['ok' => false, 'error_code' => 'ERR_SALIDA_AGENTE_INCOMPLETA', 'message' => $msg];
+            $res = ['ok' => false, 'error_code' => 'ERR_SALIDA_AGENTE_INCOMPLETA', 'invalid_fields' => $missing, 'message' => $msg];
             $this->logExecution($executionId, 'ESCENARIO_3_AGENTE_IA', 'ai.proposal.rejected', 'n8n AI Agent -> BackOffice', $ticketRef ?: 'N/A', 'ERROR', 'ERR_SALIDA_AGENTE_INCOMPLETA', $msg, $payload, $res, $startTime);
             return $res;
         }
@@ -708,9 +754,7 @@ class IntegrationService
             ? json_encode($payload['datos_consultados'], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)
             : (string) $payload['datos_consultados'];
 
-        $toolsUsed = is_array($payload['herramientas_utilizadas'] ?? null)
-            ? implode(', ', $payload['herramientas_utilizadas'])
-            : (string) ($payload['herramientas_utilizadas'] ?? 'consultar_pedido_e_historial_cliente, consultar_disponibilidad_almacen, proponer_resolucion_ticket');
+        $toolsUsed = implode(', ', $toolsList);
 
         $ins = $this->db->prepare('
             INSERT INTO erp_ai_audits (
@@ -728,13 +772,13 @@ class IntegrationService
 
         $ins->execute([
             ':ticket_ref'                => $ticketRef,
-            ':order_ref'                 => $payload['order_ref'] ?? null,
-            ':agent_model'               => $payload['agent_model'] ?? 'gemini-2.5-flash (n8n Tools Agent)',
+            ':order_ref'                 => $this->stringOrNull($payload['order_ref'] ?? null),
+            ':agent_model'               => $this->stringOrNull($payload['agent_model'] ?? null),
             ':tools_invoked'             => $toolsUsed,
             ':detected_case_type'        => (string) $payload['tipo_caso_detectado'],
             ':consulted_data_json'       => (string) $consultedJson,
             ':proposed_action'           => (string) $payload['accion_propuesta'],
-            ':proposed_customer_message' => (string) ($payload['mensaje_propuesto_telegram'] ?? 'Hola, hemos revisado tu incidencia y gestionado la solución propuesta por nuestro equipo de soporte.'),
+            ':proposed_customer_message' => trim((string) $payload['mensaje_propuesto_telegram']),
             ':justification'             => (string) $payload['justificacion_breve'],
             ':confidence_and_priority'   => (string) $payload['nivel_confianza_o_prioridad'],
             ':risks_and_warnings'        => (string) $payload['riesgos_o_advertencias'],
@@ -780,10 +824,27 @@ class IntegrationService
         $audit = $stmt->fetch();
 
         if (!$audit) {
-            return ['ok' => false, 'message' => "No existe la propuesta de auditoría #{$auditId}."];
+            return ['ok' => false, 'error_code' => 'ERR_ENTIDAD_NO_ENCONTRADA', 'message' => "No existe la propuesta de auditoría #{$auditId}."];
         }
 
-        $normalizedDecision = strtolower(trim($decision)) === 'aprobado' ? 'aprobado' : 'rechazado';
+        // La decisión y el revisor son obligatorios: nunca se aprueba por defecto
+        $normalizedDecision = strtolower(trim($decision));
+        $reviewerName = trim($reviewerName);
+        $invalid = [];
+        if (!in_array($normalizedDecision, ['aprobado', 'rechazado'], true)) {
+            $invalid[] = 'decision (aprobado | rechazado)';
+        }
+        if ($reviewerName === '') {
+            $invalid[] = 'reviewed_by';
+        }
+        if (!empty($invalid)) {
+            return [
+                'ok'             => false,
+                'error_code'     => 'ERR_CAMPOS_OBLIGATORIOS',
+                'invalid_fields' => $invalid,
+                'message'        => 'Revisión rechazada. Campos obligatorios ausentes o inválidos: ' . implode(', ', $invalid),
+            ];
+        }
         $now = date('Y-m-d H:i:s');
 
         // Obtener datos del ticket para el envío a Telegram vía n8n
@@ -864,7 +925,7 @@ class IntegrationService
         ')->execute([
             ':status'      => $normalizedDecision,
             ':reviewer'    => $reviewerName,
-            ':comment'     => $comment ?: ($normalizedDecision === 'aprobado' ? 'Verificado y autorizado para envío por Telegram.' : 'Descartado por el supervisor.'),
+            ':comment'     => $this->stringOrNull($comment),
             ':reviewed_at' => $now,
             ':tg'          => $telegramDispatched,
             ':id'          => $auditId,
@@ -1068,6 +1129,38 @@ class IntegrationService
                 'low_stock_alerts' => $lowStockCount,
             ],
         ];
+    }
+
+    /** Número de un payload JSON (int, float o texto numérico), o null si falta o no es numérico. */
+    private function numberOrNull(mixed $value): ?float
+    {
+        if (is_int($value) || is_float($value)) {
+            return (float) $value;
+        }
+        if (is_string($value) && is_numeric(trim($value))) {
+            return (float) trim($value);
+        }
+        return null;
+    }
+
+    /** Texto opcional: null si falta o está vacío (nunca un valor inventado). */
+    private function stringOrNull(mixed $value): ?string
+    {
+        if ($value === null || is_array($value)) {
+            return null;
+        }
+        $text = trim((string) $value);
+        return $text === '' ? null : $text;
+    }
+
+    /** Estado de pago según el estado del pedido (mismos estados cobrados que Order::PAID_STATUSES de la tienda). */
+    private function paymentStatusFor(string $orderStatus): string
+    {
+        return match ($orderStatus) {
+            'creado'    => 'pendiente_pago',
+            'cancelado' => 'cancelado',
+            default     => 'pagado_simulado',
+        };
     }
 
     private function logExecution(
