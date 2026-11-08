@@ -19,28 +19,8 @@ class ApiController
     public function handle(string $method, string $uri): void
     {
         header('Content-Type: application/json; charset=utf-8');
-        header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-        header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Integration-Token, X-Piquantum-Signature');
 
-        if ($method === 'OPTIONS') {
-            http_response_code(204);
-            exit;
-        }
-
-        // Verificar token de integración opcional si se envía cabecera X-Integration-Token incorrecta
-        $expectedToken = (string) Database::env('INTEGRATION_API_KEY', 'pq_bo_academic_token_2026_test');
-        $providedToken = $_SERVER['HTTP_X_INTEGRATION_TOKEN'] ?? ($_GET['api_token'] ?? null);
-        if ($providedToken !== null && $providedToken !== '' && $providedToken !== $expectedToken) {
-            $this->jsonResponse(401, [
-                'ok'         => false,
-                'error_code' => 'ERR_AUTH_TOKEN_INVALIDO',
-                'message'    => 'Token de integración X-Integration-Token inválido.',
-            ]);
-            return;
-        }
-
-        // Rutas API REST v1
+        // Health check público (sin token): lo usan Docker/Caddy para saber si el servicio está vivo.
         if ($method === 'GET' && $uri === '/api/v1/health') {
             $this->jsonResponse(200, [
                 'ok'        => true,
@@ -50,6 +30,40 @@ class ApiController
             ]);
             return;
         }
+
+        // El resto de rutas exige el token de integración, solo por cabecera X-Integration-Token.
+        // Sin valor por defecto: si el servidor no lo tiene configurado, la API no se abre.
+        $expectedToken = (string) Database::env('INTEGRATION_API_KEY', '');
+        if ($expectedToken === '') {
+            $this->jsonResponse(500, [
+                'ok'         => false,
+                'error_code' => 'ERR_CONFIGURACION',
+                'message'    => 'El servidor no tiene configurada la variable INTEGRATION_API_KEY.',
+            ]);
+            return;
+        }
+
+        $providedToken = (string) ($_SERVER['HTTP_X_INTEGRATION_TOKEN'] ?? '');
+        if ($providedToken === '') {
+            $this->jsonResponse(401, [
+                'ok'         => false,
+                'error_code' => 'ERR_AUTH_TOKEN_AUSENTE',
+                'message'    => 'Falta la cabecera X-Integration-Token.',
+            ]);
+            return;
+        }
+
+        // hash_equals compara en tiempo constante para no filtrar el token por el tiempo de respuesta.
+        if (!hash_equals($expectedToken, $providedToken)) {
+            $this->jsonResponse(401, [
+                'ok'         => false,
+                'error_code' => 'ERR_AUTH_TOKEN_INVALIDO',
+                'message'    => 'Token de integración X-Integration-Token inválido.',
+            ]);
+            return;
+        }
+
+        // Rutas API REST v1 (autenticadas)
 
         if ($method === 'GET' && $uri === '/api/v1/metrics') {
             $this->jsonResponse(200, [
