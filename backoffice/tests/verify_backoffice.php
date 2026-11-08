@@ -299,6 +299,20 @@ $realMinutes = (float) scalar($db, 'SELECT AVG((julianday(resolved_at) - juliand
 check($m['tickets']['avg_resolution_minutes'] !== null && abs($m['tickets']['avg_resolution_minutes'] - round($realMinutes, 1)) < 0.05, 'C4: tiempo de resolución real, sin mínimos', (string) $m['tickets']['avg_resolution_minutes']);
 check($m['integration']['failed_events'] >= 5, 'Cuadro de mando: errores de integración contabilizados por tipo', (string) $m['integration']['failed_events']);
 
+// --- C15: carga del catálogo desde la tienda (alta o actualización por sku, idempotente) --------------
+$import = payload('carga_catalogo_tienda');
+$import['products'][] = ['sku' => 'SAL-010', 'product_name' => 'Producto nuevo de prueba', 'category' => 'suaves', 'variant_size' => null, 'unit_price' => 6.00, 'stock_available' => 12];
+$res1 = $service->importInventory($import);
+$res2 = $service->importInventory($import);
+check($res1['ok'] === true && $res1['created'] === 1, 'C15: importar el catálogo da de alta los productos nuevos', $res1['message'] ?? '');
+check($res2['ok'] === true && $res2['created'] === 0 && $res2['updated'] === 0 && $res2['unchanged'] === 14, 'C15: importar dos veces la misma lista → sin cambios', $res2['message'] ?? '');
+check((int) scalar($db, 'SELECT COUNT(*) FROM erp_inventory') === 14, 'C15: ... y sin productos duplicados');
+check((int) scalar($db, 'SELECT stock_available FROM erp_inventory WHERE sku = ?', ['SAL-002-100ML']) === 20, 'C15: el stock queda como el de la tienda');
+$badImport = ['products' => [['sku' => 'SAL-011', 'product_name' => 'X', 'category' => 'suaves', 'unit_price' => 5.0, 'stock_available' => 3], ['sku' => 'SAL 012', 'product_name' => '', 'category' => 'suaves', 'unit_price' => 0, 'stock_available' => -1]]];
+$res = $service->importInventory($badImport);
+check($res['ok'] === false && (int) scalar($db, 'SELECT COUNT(*) FROM erp_inventory WHERE sku = ?', ['SAL-011']) === 0, 'C15: si un producto no es válido no se guarda ninguno', $res['message'] ?? '');
+check((int) scalar($db, "SELECT COUNT(*) FROM erp_integration_logs WHERE scenario = 'CARGA_CATALOGO'") === 3, 'C15: cada ejecución queda en el log');
+
 // --- Resumen ------------------------------------------------------------------------------------------
 echo "\n-----------------------------------------------------------------\n";
 echo " {$passed} pruebas correctas, {$failures} fallidas\n";

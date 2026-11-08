@@ -650,6 +650,126 @@ class IntegrationService
     }
 
     // =========================================================================
+    // CARGA INICIAL DEL CATÁLOGO DESDE LA TIENDA (POST /api/v1/inventory/import)
+    // =========================================================================
+    /**
+     * Alta o actualización de productos por sku (idempotente: importar dos veces la misma lista deja lo mismo).
+     * Todo o nada: si un producto no es válido, no se guarda ninguno.
+     * heat_level, min_stock_threshold y warehouse_location no vienen de la tienda: en las altas se dejan
+     * los valores por defecto del almacén y en las actualizaciones no se tocan.
+     */
+    public function importInventory(array $payload): array
+    {
+        $startTime = microtime(true);
+        $executionId = (string) ($payload['execution_id'] ?? ('exec_import_' . bin2hex(random_bytes(4))));
+        $direction = 'eCommerce -> n8n -> BackOffice';
+        $products = $payload['products'] ?? null;
+
+        $invalid = [];
+        $clean = [];
+        if (!is_array($products) || count($products) === 0 || !array_is_list($products)) {
+            $invalid[] = 'products[] (lista con al menos 1 producto)';
+        } else {
+            foreach ($products as $i => $p) {
+                $p = is_array($p) ? $p : [];
+                $sku = strtoupper(trim((string) ($p['sku'] ?? '')));
+                $name = trim((string) ($p['product_name'] ?? ''));
+                $category = trim((string) ($p['category'] ?? ''));
+                $price = $this->numberOrNull($p['unit_price'] ?? null);
+                $stock = $p['stock_available'] ?? null;
+                if ($sku === '' || preg_match('/\s/', $sku)) {
+                    $invalid[] = "products[{$i}].sku (sin espacios)";
+                }
+                if ($name === '') {
+                    $invalid[] = "products[{$i}].product_name";
+                }
+                if ($category === '') {
+                    $invalid[] = "products[{$i}].category";
+                }
+                if ($price === null || $price <= 0) {
+                    $invalid[] = "products[{$i}].unit_price (número > 0)";
+                }
+                if (!is_int($stock) || $stock < 0) {
+                    $invalid[] = "products[{$i}].stock_available (entero >= 0)";
+                }
+                if (isset($clean[$sku])) {
+                    $invalid[] = "products[{$i}].sku repetido ({$sku})";
+                }
+                $clean[$sku] = [
+                    'sku' => $sku, 'product_name' => $name, 'category' => $category,
+                    'variant_size' => $this->stringOrNull($p['variant_size'] ?? null),
+                    'unit_price' => $price, 'stock_available' => $stock,
+                ];
+            }
+        }
+
+        if (!empty($invalid)) {
+            $msg = 'Importación de catálogo rechazada (no se ha guardado nada). Campos ausentes o inválidos: ' . implode(', ', $invalid);
+            $res = ['ok' => false, 'error_code' => 'ERR_CAMPOS_OBLIGATORIOS', 'invalid_fields' => $invalid, 'message' => $msg];
+            $this->logExecution($executionId, 'CARGA_CATALOGO', 'inventory.imported', $direction, 'CATALOGO', 'ERROR', 'ERR_CAMPOS_OBLIGATORIOS', $msg, $payload, $res, $startTime);
+            return $res;
+        }
+
+        $created = $updated = $unchanged = 0;
+        $now = date('Y-m-d H:i:s');
+        $select = $this->db->prepare('SELECT product_name, category, variant_size, unit_price, stock_available FROM erp_inventory WHERE sku = :sku LIMIT 1');
+        $insert = $this->db->prepare('
+            INSERT INTO erp_inventory (sku, product_name, category, variant_size, unit_price, stock_available, sync_status, updated_at)
+            VALUES (:sku, :name, :category, :size, :price, :stock, "SINCRONIZADO", :updated)
+        ');
+        $update = $this->db->prepare('
+            UPDATE erp_inventory
+            SET product_name = :name, category = :category, variant_size = :size, unit_price = :price,
+                stock_available = :stock, sync_status = "SINCRONIZADO", updated_at = :updated
+            WHERE sku = :sku
+        ');
+
+        $this->db->beginTransaction();
+        try {
+            foreach ($clean as $p) {
+                $params = [
+                    ':sku' => $p['sku'], ':name' => $p['product_name'], ':category' => $p['category'],
+                    ':size' => $p['variant_size'], ':price' => $p['unit_price'], ':stock' => $p['stock_available'], ':updated' => $now,
+                ];
+                $select->execute([':sku' => $p['sku']]);
+                $current = $select->fetch();
+                if ($current === false) {
+                    $insert->execute($params);
+                    $created++;
+                } elseif ($current['product_name'] === $p['product_name'] && $current['category'] === $p['category']
+                    && $current['variant_size'] === $p['variant_size'] && abs((float) $current['unit_price'] - $p['unit_price']) < 0.001
+                    && (int) $current['stock_available'] === $p['stock_available']) {
+                    $unchanged++;
+                } else {
+                    $update->execute($params);
+                    $updated++;
+                }
+            }
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->db->rollBack();
+            $msg = 'Error interno al importar el catálogo: ' . $e->getMessage();
+            $res = ['ok' => false, 'error_code' => 'ERR_DB_TRANSACTION', 'message' => $msg];
+            $this->logExecution($executionId, 'CARGA_CATALOGO', 'inventory.imported', $direction, 'CATALOGO', 'ERROR', 'ERR_DB_TRANSACTION', $msg, $payload, $res, $startTime);
+            return $res;
+        }
+
+        $msg = sprintf('Catálogo importado: %d productos (%d altas, %d actualizados, %d sin cambios).', count($clean), $created, $updated, $unchanged);
+        $res = [
+            'ok'           => true,
+            'execution_id' => $executionId,
+            'scenario'     => 'CARGA_CATALOGO',
+            'received'     => count($clean),
+            'created'      => $created,
+            'updated'      => $updated,
+            'unchanged'    => $unchanged,
+            'message'      => $msg,
+        ];
+        $this->logExecution($executionId, 'CARGA_CATALOGO', 'inventory.imported', $direction, 'CATALOGO', 'SUCCESS', null, $msg, $payload, $res, $startTime);
+        return $res;
+    }
+
+    // =========================================================================
     // ESCENARIO 3 (PARTE 1): RECEPCIÓN DE INCIDENCIA O SOLICITUD POSTVENTA
     // =========================================================================
     public function processSupportTicket(array $payload, string $direction = 'eCommerce -> n8n -> BackOffice'): array

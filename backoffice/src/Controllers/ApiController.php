@@ -73,6 +73,13 @@ class ApiController
             return;
         }
 
+        // Carga inicial del catálogo desde la tienda (alta o actualización por sku, idempotente)
+        if ($method === 'POST' && $uri === '/api/v1/inventory/import') {
+            $result = $this->service->importInventory($this->readJsonBody());
+            $this->jsonResponse($result['ok'] ? 200 : 422, $result);
+            return;
+        }
+
         // Reintento de los avisos pendientes hacia n8n (lo puede llamar un Schedule Trigger de n8n o un cron)
         if ($method === 'POST' && $uri === '/api/v1/internal/webhooks/retry') {
             $this->jsonResponse(200, ['ok' => true] + $this->service->retryPendingWebhooks());
