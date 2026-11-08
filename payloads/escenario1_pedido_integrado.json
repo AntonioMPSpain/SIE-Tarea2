@@ -1,0 +1,34 @@
+{
+  "execution_id": "exec_escenario1_pedido_001",
+  "event_type": "order.created",
+  "order_ref": "PQ-20261108-A901BC",
+  "occurred_at": "2026-11-08T18:30:00Z",
+  "status": "pagado_simulado",
+  "payment_method": "redsys_sandbox",
+  "discount_code": "BIENVENIDA10",
+  "shipping_address": "Gran Vía Escultor Salzillo 18, 30004 Murcia",
+  "customer": {
+    "id": "USR-LAURA-01",
+    "name": "Laura Gómez (Cliente Prueba)",
+    "email": "laura@example.com",
+    "phone": "+34 600 111 222"
+  },
+  "items": [
+    {
+      "sku": "PQ-HAB-200",
+      "product_name": "Lágrima de Habanero Rojo",
+      "variant_size": "200ml",
+      "quantity": 2,
+      "unit_price": 17.50
+    },
+    {
+      "sku": "PQ-MNG-100",
+      "product_name": "Néctar Tropical Mango & Habanero",
+      "variant_size": "100ml",
+      "quantity": 1,
+      "unit_price": 11.50
+    }
+  ],
+  "shipping_amount": 4.95,
+  "total_amount": 51.45
+}

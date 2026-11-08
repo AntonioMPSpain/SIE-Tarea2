@@ -1,0 +1,14 @@
+{
+  "execution_id": "exec_escenario1_error_validacion",
+  "event_type": "order.created",
+  "order_ref": "",
+  "occurred_at": "2026-11-08T18:35:00Z",
+  "status": "creado",
+  "customer": {
+    "id": "USR-INVALID",
+    "name": "",
+    "email": "correo_sin_formato_valido"
+  },
+  "items": [],
+  "total_amount": -15.00
+}

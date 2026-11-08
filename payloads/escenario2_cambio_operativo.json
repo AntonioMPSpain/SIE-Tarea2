@@ -1,0 +1,8 @@
+{
+  "execution_id": "exec_escenario2_sync_001",
+  "change_type": "ORDER_STATUS",
+  "order_ref": "PQ-20261108-A901BC",
+  "new_status": "enviado",
+  "priority": "URGENTE",
+  "direction": "BackOffice -> n8n -> eCommerce"
+}

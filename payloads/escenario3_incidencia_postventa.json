@@ -1,0 +1,13 @@
+{
+  "execution_id": "exec_escenario3_incidencia_001",
+  "event_type": "support.requested",
+  "ticket_ref": "INC-20261108-3045",
+  "order_ref": "PQ-20261108-A901BC",
+  "customer_name": "Laura Gómez (Cliente Prueba)",
+  "customer_email": "laura@example.com",
+  "telegram_chat_id": "@laura_piquantum_test",
+  "subject": "Bote de Habanero 200ml roto durante el transporte",
+  "description": "Hola equipo de Piquantum, me acaba de llegar el pedido PQ-20261108-A901BC pero uno de los botes de Lágrima de Habanero Rojo 200ml ha llegado con el envase de cristal roto. Solicito reposición de la unidad dañada.",
+  "category": "ROTURA_TRANSPORTE",
+  "priority": "ALTA"
+}

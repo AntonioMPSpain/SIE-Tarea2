@@ -1,0 +1,27 @@
+{
+  "execution_id": "exec_escenario3_agente_ia_001",
+  "ticket_ref": "INC-20261108-3045",
+  "order_ref": "PQ-20261108-A901BC",
+  "agent_model": "gemini-2.5-flash (n8n Tools Agent)",
+  "herramientas_utilizadas": [
+    "consultar_pedido_e_historial_cliente",
+    "consultar_disponibilidad_almacen",
+    "proponer_resolucion_ticket"
+  ],
+  "tipo_caso_detectado": "ROTURA_TRANSPORTE_REPOSICION",
+  "datos_consultados": {
+    "order_ref": "PQ-20261108-A901BC",
+    "estado_pedido": "enviado",
+    "importe_pedido": 51.45,
+    "sku_afectado": "PQ-HAB-200",
+    "stock_disponible_sku": 14,
+    "incidencias_previas_cliente": 0,
+    "segmento_cliente": "VIP_PICANTE"
+  },
+  "accion_propuesta": "GENERAR_ENVIO_REPOSICION_1_UD_PQ-HAB-200_Y_NOTIFICAR_TELEGRAM",
+  "mensaje_propuesto_telegram": "🌶️ Hola Laura: Hemos revisado la incidencia INC-20261108-3045 de tu pedido PQ-20261108-A901BC. Confirmamos disponibilidad en almacén de Lágrima de Habanero Rojo (200ml) y nuestro supervisor ha autorizado el envío inmediato de 1 unidad de reemplazo sin coste.",
+  "justificacion_breve": "El pedido consta pagado y entregado hace menos de 48h, la clienta no tiene reclamaciones previas registradas y existen 14 unidades disponibles en el pasillo A2 del almacén.",
+  "nivel_confianza_o_prioridad": "Confianza: 0.95 (95%) | Prioridad: ALTA",
+  "riesgos_o_advertencias": "Acción sensible: implica salida de inventario gratuita y notificación externa al cliente vía Telegram. Queda bloqueada en modo propuesta hasta aprobación explícita de un operador humano.",
+  "estado_final": "pendiente_de_revision"
+}
