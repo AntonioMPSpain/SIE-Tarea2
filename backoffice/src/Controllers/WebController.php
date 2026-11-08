@@ -32,15 +32,13 @@ class WebController
         }
         $this->db = Database::getConnection();
         $this->service = new IntegrationService($this->db);
+        // Sin datos de demostración: la base de datos solo contiene lo que llega por la integración real (n8n).
+    }
 
-        // Si la base de datos no tiene ni un solo pedido ni log y es la primera vez que se abre,
-        // cargamos por defecto los datos de prueba "Después de la integración" para que el dashboard luzca completo,
-        // permitiendo al usuario pulsar el botón "Estado Antes de la Integración" cuando quiera tomar esa captura.
-        $hasLogs = (int) $this->db->query('SELECT COUNT(*) FROM erp_integration_logs')->fetchColumn();
-        if ($hasLogs === 0 && !isset($_SESSION['initialized_once'])) {
-            Seeder::seedAfterIntegrationDemo($this->db);
-            $_SESSION['initialized_once'] = true;
-        }
+    /** El vaciado de la base de datos solo existe en desarrollo (APP_ENV=local), nunca en producción. */
+    private function isLocalEnv(): bool
+    {
+        return strtolower((string) Database::env('APP_ENV', 'production')) === 'local';
     }
 
     public function handle(string $method, string $uri): void
@@ -101,6 +99,7 @@ class WebController
 
         $currentUser = $this->currentUser();
         $csrfToken   = $this->csrfToken();
+        $isLocalEnv  = $this->isLocalEnv();
 
         require dirname(__DIR__, 2) . '/views/layout.php';
     }
@@ -109,21 +108,17 @@ class WebController
     {
         switch ($action) {
             case 'reset_before_integration':
+                if (!$this->isLocalEnv()) {
+                    http_response_code(403);
+                    header('Content-Type: text/plain; charset=utf-8');
+                    echo 'El vaciado de la base de datos solo está disponible en desarrollo (APP_ENV=local).';
+                    exit;
+                }
                 Seeder::resetToBeforeIntegration($this->db);
                 $_SESSION['flash'] = [
                     'type' => 'warning',
-                    'title' => 'Modo Evidencia: ANTES DE LA INTEGRACIÓN activado',
-                    'message' => 'Se han limpiado pedidos, tickets, auditorías IA y logs. El almacén conserva su stock inicial. Ya puedes tomar las capturas del estado previo a la integración.',
-                ];
-                $this->redirect('/?tab=' . ($_POST['return_tab'] ?? 'dashboard'));
-                break;
-
-            case 'seed_after_integration':
-                Seeder::seedAfterIntegrationDemo($this->db);
-                $_SESSION['flash'] = [
-                    'type' => 'success',
-                    'title' => 'Modo Evidencia: DESPUÉS DE LA INTEGRACIÓN cargado',
-                    'message' => 'Se han ejecutado los flujos de prueba de los Escenarios 1, 2 y 3 (incluyendo errores controlados de validación y propuestas del Agente IA).',
+                    'title' => 'Base de datos vaciada (solo desarrollo)',
+                    'message' => 'Se han borrado pedidos, clientes, incidencias, propuestas del agente y logs. El almacén vuelve al catálogo inicial.',
                 ];
                 $this->redirect('/?tab=' . ($_POST['return_tab'] ?? 'dashboard'));
                 break;

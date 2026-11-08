@@ -1,7 +1,7 @@
 <?php
 /**
  * Vista principal del Sistema de Back-Office ERP & Cuadro de Mando Operativo — Piquantum (Tarea 2)
- * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs, $currentUser, $csrfToken
+ * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs, $currentUser, $csrfToken, $isLocalEnv
  */
 $pendingAuditsCount = (int) ($metrics['ai_agent']['pending_proposals'] ?? 0);
 $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
@@ -28,24 +28,19 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
             <span class="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold uppercase tracking-wider text-xs">Prototipo Académico</span>
             <span><strong>Sistema Independiente de Back-Office (ERP/CRM + Gobernanza IA)</strong> — Sin actividad comercial real. Datos ficticios de prueba (UCAM · Soluciones Informáticas para la Empresa · Tarea 2).</span>
         </div>
+        <?php if ($isLocalEnv): ?>
         <div class="flex items-center gap-2">
-            <form method="POST" action="/" class="inline">
+            <!-- Solo en desarrollo (APP_ENV=local): vaciar la base de datos para empezar de cero -->
+            <form method="POST" action="/" class="inline" onsubmit="return confirm('¿Vaciar la base de datos de desarrollo? Se borran pedidos, clientes, incidencias, propuestas y logs.');">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                 <input type="hidden" name="action" value="reset_before_integration">
                 <input type="hidden" name="return_tab" value="<?= htmlspecialchars($tab) ?>">
-                <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-medium transition" title="Limpia pedidos, tickets y logs para capturar el estado previo a la integración (Apartado 9.i)">
-                    📸 Estado ANTES de Integración
-                </button>
-            </form>
-            <form method="POST" action="/" class="inline">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
-                <input type="hidden" name="action" value="seed_after_integration">
-                <input type="hidden" name="return_tab" value="<?= htmlspecialchars($tab) ?>">
-                <button type="submit" class="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition" title="Ejecuta los flujos de prueba de los Escenarios 1, 2 y 3 (Apartado 9.i)">
-                    ⚡ Cargar Estado DESPUÉS de Integración
+                <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-medium transition" title="Solo desarrollo: borra pedidos, clientes, incidencias, propuestas y logs">
+                    🧹 Vaciar BD (solo desarrollo)
                 </button>
             </form>
         </div>
+        <?php endif; ?>
     </div>
 
     <!-- CABECERA DEL BACK-OFFICE -->
