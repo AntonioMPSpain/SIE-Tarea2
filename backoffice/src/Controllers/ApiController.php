@@ -73,6 +73,12 @@ class ApiController
             return;
         }
 
+        // Reintento de los avisos pendientes hacia n8n (lo puede llamar un Schedule Trigger de n8n o un cron)
+        if ($method === 'POST' && $uri === '/api/v1/internal/webhooks/retry') {
+            $this->jsonResponse(200, ['ok' => true] + $this->service->retryPendingWebhooks());
+            return;
+        }
+
         // Escenario 1: Recepción de pedido desde n8n
         if ($method === 'POST' && $uri === '/api/v1/webhooks/orders') {
             $payload = $this->readJsonBody();

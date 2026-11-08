@@ -250,6 +250,46 @@ check((int) scalar($db, 'SELECT telegram_notified FROM erp_ai_audits WHERE id = 
 check(scalar($db, 'SELECT status FROM erp_tickets WHERE ticket_ref = ?', ['INC-TEST-TG']) !== 'RESUELTA', 'C4: ... y la incidencia no se marca como resuelta');
 check((int) scalar($db, 'SELECT COUNT(*) FROM erp_integration_logs WHERE error_type = ?', ['ERR_NOTIFICACION_TELEGRAM']) === 1, 'C4: ... y el fallo queda en el log (ERR_NOTIFICACION_TELEGRAM)');
 
+// --- C14: primero se guarda, después se envía; reintentos con el mismo event_id ---------------------
+$res = $service->processOperationalChange(['change_type' => 'ORDER_STATUS', 'order_ref' => 'PQ-TEST-AVANZA', 'new_status' => 'enviado'], true);
+$outbox = $db->query("SELECT * FROM erp_outbox_webhooks WHERE entity_type = 'order' AND entity_ref = 'PQ-TEST-AVANZA'")->fetch();
+check($res['ok'] === true && $res['sync_status'] === 'PENDIENTE_SINCRONIZACION', 'C14: cambio de estado con n8n apagado → se guarda y queda PENDIENTE_SINCRONIZACION', $res['message'] ?? '');
+check(scalar($db, 'SELECT order_status FROM erp_orders WHERE order_ref = ?', ['PQ-TEST-AVANZA']) === 'enviado' && $outbox && $outbox['status'] === 'PENDIENTE' && (int) $outbox['attempts'] === 1, 'C14: ... el cambio está guardado y el aviso en la bandeja de salida (1 intento)');
+
+// Aviso que se agota: stock de SAL-004 con n8n apagado → 5 intentos → FALLIDO
+$service->processOperationalChange(['change_type' => 'STOCK_UPDATE', 'sku' => 'SAL-004', 'new_stock' => 69], true);
+$stockOutboxId = (int) scalar($db, "SELECT id FROM erp_outbox_webhooks WHERE entity_type = 'inventory' AND entity_ref = 'SAL-004'");
+for ($i = 0; $i < IntegrationService::MAX_WEBHOOK_ATTEMPTS - 1; $i++) {
+    $service->deliverWebhook($stockOutboxId); // solo este aviso; los demás siguen pendientes
+}
+$stockOutbox = $db->query("SELECT status, attempts FROM erp_outbox_webhooks WHERE entity_type = 'inventory' AND entity_ref = 'SAL-004'")->fetch();
+check($stockOutbox['status'] === 'FALLIDO' && (int) $stockOutbox['attempts'] === IntegrationService::MAX_WEBHOOK_ATTEMPTS, 'C14: tras el máximo de intentos el aviso queda FALLIDO', json_encode($stockOutbox));
+check(scalar($db, 'SELECT sync_status FROM erp_inventory WHERE sku = ?', ['SAL-004']) === 'ERROR_SINCRONIZACION', 'C14: ... y el producto queda en ERROR_SINCRONIZACION');
+
+// Se «enciende» n8n (servidor PHP simulado) y se lanza el reintento
+$fakeLog = sys_get_temp_dir() . '/pq_fake_n8n_' . bin2hex(random_bytes(4)) . '.log';
+$fakePort = random_int(20000, 40000);
+$fakeEnv = array_merge(getenv(), ['FAKE_N8N_LOG' => $fakeLog]);
+$fake = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$fakePort}", __DIR__ . '/fixtures/fake_n8n.php'], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes, null, $fakeEnv);
+for ($i = 0; $i < 50 && @fsockopen('127.0.0.1', $fakePort) === false; $i++) {
+    usleep(100000);
+}
+putenv("N8N_WEBHOOK_OPERATIONAL_CHANGE_URL=http://127.0.0.1:{$fakePort}/webhook/operational-change");
+putenv("N8N_WEBHOOK_HUMAN_REVIEW_URL=http://127.0.0.1:{$fakePort}/webhook/human-review");
+$summary = $service->retryPendingWebhooks();
+proc_terminate($fake);
+$received = file_exists($fakeLog) ? array_map(fn ($l) => json_decode($l, true), file($fakeLog, FILE_IGNORE_NEW_LINES)) : [];
+@unlink($fakeLog);
+check($summary['sent'] >= 2, 'C14: reintento con n8n encendido → avisos entregados', json_encode(array_diff_key($summary, ['details' => 1])));
+check(scalar($db, 'SELECT sync_status FROM erp_orders WHERE order_ref = ?', ['PQ-TEST-AVANZA']) === 'SINCRONIZADO', 'C14: ... el pedido pasa a SINCRONIZADO');
+$receivedIds = array_map(fn ($r) => json_decode($r['body'], true)['event_id'] ?? null, $received);
+check(in_array($outbox['event_id'], $receivedIds, true), 'C14: ... con el mismo event_id del primer intento', $outbox['event_id']);
+$expectedSig = 'sha256=' . hash_hmac('sha256', (string) $outbox['body_json'], 'secreto-de-pruebas');
+check(in_array($expectedSig, array_column($received, 'signature'), true), 'C14: ... y el cuerpo firmado con HMAC es exactamente el guardado');
+check((int) scalar($db, 'SELECT telegram_notified FROM erp_ai_audits WHERE id = ?', [$tgAudit]) === 1
+    && scalar($db, 'SELECT status FROM erp_tickets WHERE ticket_ref = ?', ['INC-TEST-TG']) === 'RESUELTA', 'C14/C4: la notificación pendiente de Telegram se entrega → telegram_notified = 1 y la incidencia se resuelve');
+check(scalar($db, 'SELECT status FROM erp_outbox_webhooks WHERE entity_type = ? AND entity_ref = ?', ['inventory', 'SAL-004']) === 'FALLIDO', 'C14: un aviso FALLIDO no se reintenta automáticamente');
+
 // --- C4: cuadro de mando solo con datos reales ------------------------------------------------------
 $m = $service->getDashboardMetrics();
 check($m['orders']['total_count'] === 2, 'Cuadro de mando: 2 pedidos (el cancelado no cuenta)', (string) $m['orders']['total_count']);
