@@ -1,7 +1,7 @@
 <?php
 /**
  * Inicio de sesión del operador del Back-Office.
- * Variables disponibles: $error (?string), $email (string)
+ * Variables disponibles: $error (?string), $email (string), $csrfToken (string)
  */
 ?>
 <!DOCTYPE html>
@@ -26,6 +26,7 @@
         </div>
 
         <form method="POST" action="/login" class="bg-slate-800/85 border border-slate-700 rounded-xl p-5 space-y-4">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
             <?php if (!empty($error)): ?>
                 <div class="text-sm text-rose-200 bg-rose-500/15 border border-rose-500/40 rounded-lg px-3 py-2" role="alert">
                     <?= htmlspecialchars($error) ?>

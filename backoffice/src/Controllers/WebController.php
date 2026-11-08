@@ -45,6 +45,14 @@ class WebController
 
     public function handle(string $method, string $uri): void
     {
+        // Todo formulario POST (también el login y el cierre de sesión) debe llevar el token CSRF de la sesión.
+        if ($method === 'POST' && !$this->hasValidCsrfToken()) {
+            http_response_code(403);
+            header('Content-Type: text/plain; charset=utf-8');
+            echo 'Formulario rechazado: falta el token CSRF o no es válido. Vuelve a cargar la página e inténtalo de nuevo.';
+            return;
+        }
+
         // Rutas públicas: solo el inicio de sesión
         if ($uri === '/login') {
             if ($method === 'POST') {
@@ -92,6 +100,7 @@ class WebController
         $logs      = $this->db->query('SELECT * FROM erp_integration_logs ORDER BY id DESC LIMIT 50')->fetchAll();
 
         $currentUser = $this->currentUser();
+        $csrfToken   = $this->csrfToken();
 
         require dirname(__DIR__, 2) . '/views/layout.php';
     }
@@ -220,6 +229,7 @@ class WebController
             $this->redirect('/');
         }
         http_response_code($status);
+        $csrfToken = $this->csrfToken();
         require dirname(__DIR__, 2) . '/views/login.php';
     }
 
@@ -249,6 +259,7 @@ class WebController
         // Nuevo identificador de sesión al entrar: evita la fijación de sesión.
         session_regenerate_id(true);
         $_SESSION['user'] = ['email' => $adminEmail];
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32)); // token CSRF nuevo para la sesión iniciada
 
         $this->redirect('/');
     }
@@ -267,6 +278,26 @@ class WebController
         session_destroy();
 
         $this->redirect('/login');
+    }
+
+    // =========================================================================
+    // PROTECCIÓN CSRF
+    // =========================================================================
+
+    /** Token CSRF de la sesión; se crea la primera vez que se pide. */
+    private function csrfToken(): string
+    {
+        if (empty($_SESSION['csrf_token']) || !is_string($_SESSION['csrf_token'])) {
+            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        }
+        return $_SESSION['csrf_token'];
+    }
+
+    private function hasValidCsrfToken(): bool
+    {
+        $expected = $_SESSION['csrf_token'] ?? '';
+        $sent     = $_POST['csrf_token'] ?? '';
+        return is_string($expected) && is_string($sent) && $expected !== '' && hash_equals($expected, $sent);
     }
 
     private function redirect(string $url): void

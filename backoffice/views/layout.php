@@ -1,7 +1,7 @@
 <?php
 /**
  * Vista principal del Sistema de Back-Office ERP & Cuadro de Mando Operativo — Piquantum (Tarea 2)
- * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs, $currentUser
+ * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs, $currentUser, $csrfToken
  */
 $pendingAuditsCount = (int) ($metrics['ai_agent']['pending_proposals'] ?? 0);
 $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
@@ -30,6 +30,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
         </div>
         <div class="flex items-center gap-2">
             <form method="POST" action="/" class="inline">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                 <input type="hidden" name="action" value="reset_before_integration">
                 <input type="hidden" name="return_tab" value="<?= htmlspecialchars($tab) ?>">
                 <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-medium transition" title="Limpia pedidos, tickets y logs para capturar el estado previo a la integración (Apartado 9.i)">
@@ -37,6 +38,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 </button>
             </form>
             <form method="POST" action="/" class="inline">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                 <input type="hidden" name="action" value="seed_after_integration">
                 <input type="hidden" name="return_tab" value="<?= htmlspecialchars($tab) ?>">
                 <button type="submit" class="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition" title="Ejecuta los flujos de prueba de los Escenarios 1, 2 y 3 (Apartado 9.i)">
@@ -92,6 +94,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
             <div class="flex items-center gap-2 text-xs text-slate-400">
                 <span>👤 <?= htmlspecialchars((string) ($currentUser['email'] ?? '')) ?></span>
                 <form method="POST" action="/logout" class="inline">
+                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                     <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-medium transition">
                         Cerrar sesión
                     </button>
@@ -468,6 +471,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
 
                             <!-- Formulario de Cambio Operativo / Sincronización (Escenario 2) -->
                             <form method="POST" action="/" class="bg-slate-900/90 rounded-lg p-3 border border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                                 <input type="hidden" name="action" value="update_order_status">
                                 <input type="hidden" name="order_ref" value="<?= htmlspecialchars($ord['order_ref']) ?>">
                                 <div class="text-xs text-slate-300 font-medium">
@@ -541,6 +545,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                     <td class="p-3 text-center font-mono text-[11px] text-sky-300"><?= htmlspecialchars($item['sync_status']) ?></td>
                                     <td class="p-3 text-right">
                                         <form method="POST" action="/" class="inline-flex items-center gap-1.5">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                                             <input type="hidden" name="action" value="update_inventory_stock">
                                             <input type="hidden" name="sku" value="<?= htmlspecialchars($item['sku']) ?>">
                                             <input type="number" name="new_stock" min="0" max="500" value="<?= (int) $item['stock_available'] ?>"
@@ -651,6 +656,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                             <!-- PANEL DE REVISIÓN HUMANA (Human-in-the-loop) -->
                             <?php if ($isPending): ?>
                                 <form method="POST" action="/" class="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                                     <input type="hidden" name="action" value="review_ai_proposal">
                                     <input type="hidden" name="audit_id" value="<?= (int) $audit['id'] ?>">
                                     <div class="text-xs text-amber-200">
@@ -766,6 +772,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     </div>
 
                     <form method="POST" action="/" class="space-y-3">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                         <input type="hidden" name="action" value="simulate_payload">
                         <div>
                             <label class="block text-xs text-slate-400 mb-1">Endpoint / Contrato Destino:</label>
