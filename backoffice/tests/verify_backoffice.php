@@ -2,6 +2,32 @@
 
 declare(strict_types=1);
 
+/**
+ * Pruebas automáticas del Back-Office (php backoffice/tests/verify_backoffice.php).
+ *
+ * Usan SIEMPRE una base de datos SQLite temporal propia, que se crea al empezar y se borra al terminar:
+ * nunca tocan la base de datos de la aplicación (ni en local ni en el servidor).
+ * Devuelven código de salida 0 si todo va bien y 1 si alguna prueba falla.
+ */
+
+// --- Entorno de pruebas aislado (antes de cargar nada que lea la configuración) ---------------------
+$testDb = sys_get_temp_dir() . '/pq_backoffice_tests_' . bin2hex(random_bytes(4)) . '.sqlite';
+putenv("DB_CONNECTION=sqlite");
+putenv("DB_SQLITE_PATH={$testDb}");
+putenv('INTEGRATION_API_KEY=token-de-pruebas');
+putenv('WEBHOOK_HMAC_SECRET=secreto-de-pruebas');
+// n8n «apagado»: puerto cerrado, la conexión falla al momento
+putenv('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL=http://127.0.0.1:9/n8n-apagado');
+putenv('N8N_WEBHOOK_HUMAN_REVIEW_URL=http://127.0.0.1:9/n8n-apagado');
+
+register_shutdown_function(static function () use ($testDb): void {
+    foreach ([$testDb, "{$testDb}-journal", "{$testDb}-wal", "{$testDb}-shm"] as $file) {
+        if (file_exists($file)) {
+            unlink($file);
+        }
+    }
+});
+
 spl_autoload_register(function (string $class): void {
     $prefix = 'Piquantum\\BackOffice\\';
     if (!str_starts_with($class, $prefix)) {
@@ -28,64 +54,145 @@ spl_autoload_register(function (string $class): void {
 });
 date_default_timezone_set('Europe/Madrid');
 
+use Piquantum\BackOffice\Config\Database;
+use Piquantum\BackOffice\Services\IntegrationService;
+
+// --- Mini framework de pruebas (assert() de PHP suele estar desactivado en producción) ---------------
+$failures = 0;
+$passed = 0;
+function check(bool $condition, string $description, string $detail = ''): void
+{
+    global $failures, $passed;
+    if ($condition) {
+        $passed++;
+        echo "[OK]    {$description}\n";
+    } else {
+        $failures++;
+        echo "[FALLO] {$description}" . ($detail !== '' ? "\n        → {$detail}" : '') . "\n";
+    }
+}
+function payload(string $name): array
+{
+    return json_decode((string) file_get_contents(dirname(__DIR__, 2) . "/payloads/{$name}.json"), true, 512, JSON_THROW_ON_ERROR);
+}
+function scalar(PDO $db, string $sql, array $params = []): mixed
+{
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetchColumn();
+}
+
 echo "=================================================================\n";
-echo " VERIFICACIÓN AUTOMÁTICA DEL BACK-OFFICE ERP PIQUANTUM (TAREA 2)\n";
+echo " PRUEBAS AUTOMÁTICAS DEL BACK-OFFICE ERP PIQUANTUM (TAREA 2)\n";
+echo " Base de datos temporal: {$testDb}\n";
 echo "=================================================================\n\n";
 
-$db = \Piquantum\BackOffice\Config\Database::getConnection();
-$service = new \Piquantum\BackOffice\Services\IntegrationService($db);
+$db = Database::getConnection();
+$service = new IntegrationService($db);
 
-// 1. Verificar Modo ANTES de la Integración
-\Piquantum\BackOffice\Database\Seeder::resetToBeforeIntegration($db);
-$beforeMetrics = $service->getDashboardMetrics();
-assert($beforeMetrics['orders']['total_count'] === 0, 'Antes de integración debe haber 0 pedidos');
-echo "[OK] 1. Estado 'Antes de la integración' verificado (0 pedidos, 12 SKUs en almacén).\n";
+// --- C3 / C5: base de datos vacía con solo el catálogo real -------------------------------------------
+$counts = $db->query('SELECT (SELECT COUNT(*) FROM erp_orders) o, (SELECT COUNT(*) FROM erp_customers) c,
+    (SELECT COUNT(*) FROM erp_tickets) t, (SELECT COUNT(*) FROM erp_integration_logs) l,
+    (SELECT COUNT(*) FROM erp_ai_audits) a, (SELECT COUNT(*) FROM erp_inventory) i')->fetch();
+check($counts['o'] + $counts['c'] + $counts['t'] + $counts['l'] + $counts['a'] === 0, 'C3: BD nueva sin pedidos, clientes, incidencias, logs ni propuestas', json_encode($counts));
+check((int) $counts['i'] === 13, 'C5: almacén con los 13 productos de la tienda', "productos: {$counts['i']}");
+check(scalar($db, 'SELECT product_name FROM erp_inventory WHERE sku = ?', ['SAL-002-100ML']) === 'Salsa Chipotle Ahumado', 'C5: código SAL-002-100ML = Salsa Chipotle Ahumado');
 
-// 2. Verificar Escenario 1 con Payload oficial
-$payload1 = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/payloads/escenario1_pedido_integrado.json'), true);
-$res1 = $service->processOrderEvent($payload1);
-assert($res1['ok'] === true && $res1['idempotent_update'] === false, 'Pedido válido debe crearse');
-echo "[OK] 2. Escenario 1 (Pedido válido): {$res1['message']}\n";
+// --- Escenario 1: pedido válido ---------------------------------------------------------------------
+$order = payload('escenario1_pedido_integrado');
+$res = $service->processOrderEvent($order);
+check($res['ok'] === true && ($res['idempotent_update'] ?? null) === false, 'Escenario 1: pedido válido creado', $res['message'] ?? '');
+check((int) scalar($db, 'SELECT stock_available FROM erp_inventory WHERE sku = ?', ['SAL-002-100ML']) === 18, 'C5: SAL-002-100ML × 2 descuenta el stock de 20 a 18');
+check(scalar($db, 'SELECT phone FROM erp_customers WHERE email = ?', ['laura@example.com']) === null, 'C6: cliente sin teléfono se guarda con teléfono NULL');
+check(scalar($db, 'SELECT variant_size FROM erp_order_items WHERE sku = ?', ['SAL-005']) === null, 'C6: línea sin tamaño se guarda con variant_size NULL');
 
-// 3. Verificar Idempotencia en Escenario 1
-$res1Idem = $service->processOrderEvent($payload1);
-assert($res1Idem['ok'] === true && $res1Idem['idempotent_update'] === true, 'Reenvío debe ser idempotente');
-echo "[OK] 3. Idempotencia básica verificada: {$res1Idem['message']}\n";
+// --- C6: rechazar en lugar de inventar ----------------------------------------------------------------
+$bad = $order;
+$bad['order_ref'] = 'PQ-TEST-SIN-PRECIO';
+unset($bad['items'][1]['unit_price']);
+$res = $service->processOrderEvent($bad);
+check($res['ok'] === false && $res['error_code'] === 'ERR_CAMPOS_OBLIGATORIOS' && str_contains($res['message'], 'items[1].unit_price'), 'C6: línea sin unit_price → ERR_CAMPOS_OBLIGATORIOS que la nombra', $res['message'] ?? '');
+$bad = $order;
+$bad['order_ref'] = 'PQ-TEST-ESTADO';
+$bad['status'] = 'estado_inventado';
+$res = $service->processOrderEvent($bad);
+check($res['ok'] === false && str_contains($res['message'], 'status'), 'C6: estado fuera del catálogo → rechazado');
+$res = $service->processOrderEvent(payload('escenario1_error_datos_incompletos'));
+check($res['ok'] === false, 'Escenario 1: payload incompleto → rama de error', $res['message'] ?? '');
 
-// 4. Verificar Rama de Error con Payload incompleto
-$payloadErr = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/payloads/escenario1_error_datos_incompletos.json'), true);
-$resErr = $service->processOrderEvent($payloadErr);
-assert($resErr['ok'] === false, 'Payload incompleto debe fallar en validación');
-echo "[OK] 4. Rama de Error y Validación verificada: [{$resErr['error_code']}] {$resErr['message']}\n";
+// --- C7: SKU desconocido y stock insuficiente ---------------------------------------------------------
+$ordersBefore = (int) scalar($db, 'SELECT COUNT(*) FROM erp_orders');
+$bad = $order;
+$bad['order_ref'] = 'PQ-TEST-SKU';
+$bad['items'][1]['sku'] = 'SAL-999';
+$res = $service->processOrderEvent($bad);
+check($res['ok'] === false && $res['error_code'] === 'ERR_ENTIDAD_NO_ENCONTRADA' && str_contains($res['message'], 'SAL-999'), 'C7: pedido con SAL-999 → ERR_ENTIDAD_NO_ENCONTRADA', $res['message'] ?? '');
+check((int) scalar($db, 'SELECT COUNT(*) FROM erp_orders') === $ordersBefore, 'C7: ... y ninguna fila nueva en erp_orders');
+$bad = $order;
+$bad['order_ref'] = 'PQ-TEST-STOCK';
+$bad['items'] = [['sku' => 'SAL-001-200ML', 'product_name' => 'Salsa Carolina Reaper Inferno', 'variant_size' => '200 ml', 'quantity' => 50, 'unit_price' => 18.50]];
+$bad['total_amount'] = 929.95;
+$res = $service->processOrderEvent($bad);
+check($res['ok'] === false && $res['error_code'] === 'ERR_STOCK_INSUFICIENTE', 'C7: 50 uds de SAL-001-200ML → ERR_STOCK_INSUFICIENTE', $res['message'] ?? '');
+check((int) scalar($db, 'SELECT stock_available FROM erp_inventory WHERE sku = ?', ['SAL-001-200ML']) === 5, 'C7: ... y el stock no cambia');
 
-// 5. Verificar Escenario 2 (Cambio Operativo)
-$payload2 = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/payloads/escenario2_cambio_operativo.json'), true);
-$res2 = $service->processOperationalChange($payload2, false);
-assert($res2['ok'] === true && $res2['new_status'] === 'enviado', 'Cambio operativo debe actualizar estado');
-echo "[OK] 5. Escenario 2 (Cambio Operativo): {$res2['message']}\n";
+// --- Escenario 2: cambio operativo --------------------------------------------------------------------
+$res = $service->processOperationalChange(payload('escenario2_cambio_operativo'), false);
+check($res['ok'] === true && $res['new_status'] === 'enviado', 'Escenario 2: cambio de estado a enviado', $res['message'] ?? '');
 
-// 6. Verificar Escenario 3 (Incidencia Postventa)
-$payload3 = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/payloads/escenario3_incidencia_postventa.json'), true);
-$res3 = $service->processSupportTicket($payload3);
-assert($res3['ok'] === true, 'Ticket postventa debe crearse');
-echo "[OK] 6. Escenario 3 (Incidencia Postventa): {$res3['message']}\n";
+// --- Escenario 3 y C8: incidencia y chat_id de Telegram -----------------------------------------------
+$ticket = payload('escenario3_incidencia_postventa');
+$res = $service->processSupportTicket($ticket);
+check($res['ok'] === true && $res['telegram_chat_id'] === null, 'C8: incidencia sin telegram_chat_id se crea igualmente', $res['message'] ?? '');
+$badTicket = $ticket;
+$badTicket['ticket_ref'] = 'INC-TEST-ARROBA';
+$badTicket['telegram_chat_id'] = '@laura_piquantum_test';
+$res = $service->processSupportTicket($badTicket);
+check($res['ok'] === false && str_contains($res['message'], 'telegram_chat_id'), 'C8: telegram_chat_id con @usuario → rechazado');
 
-// 7. Verificar Tools de Consulta del Agente de IA
+// --- Tools del agente y propuesta estructurada ------------------------------------------------------
 $toolOrder = $service->getAgentOrderContext('PQ-20261108-A901BC');
-$toolStock = $service->getAgentStockContext('PQ-HAB-200');
-assert($toolOrder['found'] === true && $toolStock['found'] === true, 'Tools de consulta del Agente IA deben responder');
-echo "[OK] 7. Tools de Consulta del Agente IA verificadas (Pedido: {$toolOrder['order']['order_ref']}, Stock PQ-HAB-200: {$toolStock['stock_available']} uds).\n";
+$toolStock = $service->getAgentStockContext('SAL-002-100ML');
+check($toolOrder['found'] === true && $toolStock['found'] === true && $toolStock['stock_available'] === 18, 'Tools del agente: consulta de pedido y de stock');
+$proposal = payload('escenario3_salida_estructurada_agente_ia');
+$incomplete = $proposal;
+unset($incomplete['mensaje_propuesto_telegram']);
+$res = $service->registerAgentProposal($incomplete);
+check($res['ok'] === false && $res['error_code'] === 'ERR_SALIDA_AGENTE_INCOMPLETA', 'C6: propuesta sin mensaje para el cliente → rechazada');
+$res = $service->registerAgentProposal($proposal);
+check($res['ok'] === true && $res['final_status'] === 'pendiente_de_revision', 'Agente IA: propuesta con los 7 campos queda pendiente_de_revision');
+$auditId = (int) ($res['audit_id'] ?? 0);
 
-// 8. Verificar Tool de Propuesta Estructurada del Agente IA (7 campos obligatorios)
-$payloadAi = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/payloads/escenario3_salida_estructurada_agente_ia.json'), true);
-$resAi = $service->registerAgentProposal($payloadAi);
-assert($resAi['ok'] === true && $resAi['final_status'] === 'pendiente_de_revision', 'Propuesta IA debe quedar en pendiente_de_revision');
-echo "[OK] 8. Salida estructurada de 7 campos del Agente IA verificada: {$resAi['message']}\n";
+// --- Supervisión humana -------------------------------------------------------------------------------
+$res = $service->reviewAgentProposal($auditId, '', '');
+check($res['ok'] === false && $res['error_code'] === 'ERR_CAMPOS_OBLIGATORIOS', 'C6: revisión sin decisión ni revisor → rechazada (nunca se aprueba por defecto)');
+$res = $service->reviewAgentProposal($auditId, 'aprobado', 'operador@erp.piquantum.test');
+check($res['ok'] === true && $res['telegram_notified'] === false && str_contains($res['message'], 'Sin chat_id'), 'C8: aprobar sin chat_id → no se notifica y queda en el log', $res['message'] ?? '');
 
-// 9. Cargar dataset completo de demostración y verificar Cuadro de Mando Operativo
-\Piquantum\BackOffice\Database\Seeder::seedAfterIntegrationDemo($db);
-$afterMetrics = $service->getDashboardMetrics();
-assert($afterMetrics['orders']['total_count'] >= 6, 'Debe haber al menos 6 pedidos en demo');
-assert($afterMetrics['integration']['failed_events'] >= 2, 'Debe haber errores registrados por tipo');
-echo "[OK] 9. Cuadro de Mando Operativo verificado: {$afterMetrics['orders']['total_count']} pedidos, {$afterMetrics['orders']['total_revenue']} € facturados, {$afterMetrics['integration']['success_events']} eventos OK, {$afterMetrics['integration']['failed_events']} errores.\n\n";
-echo ">>> TODAS LAS PRUEBAS DEL BACK-OFFICE SUPERADAS CON ÉXITO <<<\n";
+// C4: con chat_id y n8n apagado → telegram_notified = 0, sin resolver y error en el log
+$tgTicket = $ticket;
+$tgTicket['ticket_ref'] = 'INC-TEST-TG';
+$tgTicket['telegram_chat_id'] = '123456789';
+$service->processSupportTicket($tgTicket);
+$tgProposal = $proposal;
+$tgProposal['ticket_ref'] = 'INC-TEST-TG';
+$tgAudit = (int) $service->registerAgentProposal($tgProposal)['audit_id'];
+$res = $service->reviewAgentProposal($tgAudit, 'aprobado', 'operador@erp.piquantum.test');
+check((int) scalar($db, 'SELECT telegram_notified FROM erp_ai_audits WHERE id = ?', [$tgAudit]) === 0, 'C4: n8n apagado → telegram_notified = 0');
+check(scalar($db, 'SELECT status FROM erp_tickets WHERE ticket_ref = ?', ['INC-TEST-TG']) !== 'RESUELTA', 'C4: ... y la incidencia no se marca como resuelta');
+check((int) scalar($db, 'SELECT COUNT(*) FROM erp_integration_logs WHERE error_type = ?', ['ERR_NOTIFICACION_TELEGRAM']) === 1, 'C4: ... y el fallo queda en el log (ERR_NOTIFICACION_TELEGRAM)');
+
+// --- C4: cuadro de mando solo con datos reales ------------------------------------------------------
+$m = $service->getDashboardMetrics();
+check($m['orders']['total_count'] === 1, 'Cuadro de mando: 1 pedido integrado', (string) $m['orders']['total_count']);
+check(array_keys($m['conversion']['funnel']) === ['orders_integrated', 'orders_paid', 'orders_with_ticket'], 'C4: el embudo solo tiene etapas con datos del Back-Office');
+check($m['conversion']['funnel']['orders_integrated'] === 1 && $m['conversion']['funnel']['orders_with_ticket'] === 1, 'C4: cifras del embudo salen de la BD', json_encode($m['conversion']['funnel']));
+$realMinutes = (float) scalar($db, 'SELECT AVG((julianday(resolved_at) - julianday(created_at)) * 1440) FROM erp_tickets WHERE resolved_at IS NOT NULL');
+check($m['tickets']['avg_resolution_minutes'] !== null && abs($m['tickets']['avg_resolution_minutes'] - round($realMinutes, 1)) < 0.05, 'C4: tiempo de resolución real, sin mínimos', (string) $m['tickets']['avg_resolution_minutes']);
+check($m['integration']['failed_events'] >= 5, 'Cuadro de mando: errores de integración contabilizados por tipo', (string) $m['integration']['failed_events']);
+
+// --- Resumen ------------------------------------------------------------------------------------------
+echo "\n-----------------------------------------------------------------\n";
+echo " {$passed} pruebas correctas, {$failures} fallidas\n";
+echo "-----------------------------------------------------------------\n";
+exit($failures === 0 ? 0 : 1);

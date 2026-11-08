@@ -98,8 +98,9 @@ class Database
                     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 ]);
             } else {
-                $relPath = self::env('DB_SQLITE_PATH', 'storage/database/piquantum_erp.sqlite');
-                $fullPath = $baseDir . '/' . ltrim($relPath, '/\\');
+                // Ruta relativa a backoffice/ o absoluta (las pruebas usan un archivo temporal propio)
+                $sqlitePath = (string) self::env('DB_SQLITE_PATH', 'storage/database/piquantum_erp.sqlite');
+                $fullPath = str_starts_with($sqlitePath, '/') ? $sqlitePath : $baseDir . '/' . ltrim($sqlitePath, '/\\');
                 $dir = dirname($fullPath);
                 if (!is_dir($dir)) {
                     mkdir($dir, 0775, true);
