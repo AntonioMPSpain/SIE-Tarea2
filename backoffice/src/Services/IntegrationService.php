@@ -142,7 +142,31 @@ class IntegrationService
         try {
             $this->db->beginTransaction();
 
-            // 3. Upsert Cliente en Back-Office
+            // 3. Control de Idempotencia por order_ref (Apartado 13 - Rúbrica: idempotencia básica)
+            $stmtOrd = $this->db->prepare('SELECT * FROM erp_orders WHERE order_ref = :ref LIMIT 1');
+            $stmtOrd->execute([':ref' => $orderRef]);
+            $existingOrder = $stmtOrd->fetch();
+
+            // 4. Pedido nuevo: TODOS los SKU tienen que existir en el almacén y con stock suficiente,
+            //    antes de escribir nada. Si falla una línea, no se guarda nada (rollback).
+            if (!$existingOrder) {
+                $stockError = $this->checkSkusAndStock($items);
+                if ($stockError !== null) {
+                    $this->db->rollBack();
+                    $response = [
+                        'ok'           => false,
+                        'execution_id' => $executionId,
+                        'scenario'     => 'ESCENARIO_1_PEDIDO',
+                        'error_code'   => $stockError['error_code'],
+                        'details'      => $stockError['details'],
+                        'message'      => $stockError['message'],
+                    ];
+                    $this->logExecution($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, 'ERROR', $stockError['error_code'], $stockError['message'], $payload, $response, $startTime);
+                    return $response;
+                }
+            }
+
+            // 5. Upsert Cliente en Back-Office
             $stmtCust = $this->db->prepare('SELECT * FROM erp_customers WHERE email = :email LIMIT 1');
             $stmtCust->execute([':email' => strtolower($customerEmail)]);
             $existingCustomer = $stmtCust->fetch();
@@ -181,11 +205,6 @@ class IntegrationService
                 ]);
                 $customerId = (int) $this->db->lastInsertId();
             }
-
-            // 4. Control de Idempotencia por order_ref (Apartado 13 - Rúbrica: idempotencia básica)
-            $stmtOrd = $this->db->prepare('SELECT * FROM erp_orders WHERE order_ref = :ref LIMIT 1');
-            $stmtOrd->execute([':ref' => $orderRef]);
-            $existingOrder = $stmtOrd->fetch();
 
             $isIdempotentUpdate = false;
             if ($existingOrder) {
@@ -254,9 +273,9 @@ class IntegrationService
                 ');
                 $updStock = $this->db->prepare('
                     UPDATE erp_inventory
-                    SET stock_available = CASE WHEN stock_available >= :qty THEN stock_available - :qty ELSE 0 END,
+                    SET stock_available = stock_available - :qty,
                         updated_at = :updated_at
-                    WHERE sku = :sku
+                    WHERE sku = :sku AND stock_available >= :qty
                 ');
 
                 foreach ($items as $item) {
@@ -280,6 +299,10 @@ class IntegrationService
                         ':updated_at' => date('Y-m-d H:i:s'),
                         ':sku'        => $sku,
                     ]);
+                    // Red de seguridad: si el stock ha cambiado entre la comprobación y el descuento, se deshace todo
+                    if ($updStock->rowCount() !== 1) {
+                        throw new \DomainException("Stock insuficiente para {$sku} al descontar {$qty} uds.");
+                    }
                 }
 
                 // Actualizar métricas acumuladas del cliente
@@ -323,6 +346,19 @@ class IntegrationService
                 $startTime
             );
 
+            return $response;
+        } catch (\DomainException $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            $response = [
+                'ok'           => false,
+                'execution_id' => $executionId,
+                'scenario'     => 'ESCENARIO_1_PEDIDO',
+                'error_code'   => 'ERR_STOCK_INSUFICIENTE',
+                'message'      => $e->getMessage(),
+            ];
+            $this->logExecution($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, 'ERROR', 'ERR_STOCK_INSUFICIENTE', $e->getMessage(), $payload, $response, $startTime);
             return $response;
         } catch (Throwable $e) {
             if ($this->db->inTransaction()) {
@@ -1129,6 +1165,49 @@ class IntegrationService
                 'low_stock_alerts' => $lowStockCount,
             ],
         ];
+    }
+
+    /**
+     * Comprueba que todos los SKU del pedido existen en el almacén y tienen stock suficiente
+     * (sumando las cantidades si un SKU aparece en varias líneas). Devuelve null si todo está bien.
+     */
+    private function checkSkusAndStock(array $items): ?array
+    {
+        $qtyBySku = [];
+        foreach ($items as $item) {
+            $sku = strtoupper(trim((string) $item['sku']));
+            $qtyBySku[$sku] = ($qtyBySku[$sku] ?? 0) + (int) $item['quantity'];
+        }
+
+        $stmt = $this->db->prepare('SELECT stock_available FROM erp_inventory WHERE sku = :sku LIMIT 1');
+        $unknown = [];
+        $insufficient = [];
+        foreach ($qtyBySku as $sku => $qty) {
+            $stmt->execute([':sku' => $sku]);
+            $stock = $stmt->fetchColumn();
+            if ($stock === false) {
+                $unknown[] = $sku;
+            } elseif ((int) $stock < $qty) {
+                $insufficient[] = ['sku' => $sku, 'requested' => $qty, 'available' => (int) $stock];
+            }
+        }
+
+        if (!empty($unknown)) {
+            return [
+                'error_code' => 'ERR_ENTIDAD_NO_ENCONTRADA',
+                'details'    => ['unknown_skus' => $unknown],
+                'message'    => 'Pedido rechazado: SKU no registrados en el almacén del Back-Office: ' . implode(', ', $unknown),
+            ];
+        }
+        if (!empty($insufficient)) {
+            $parts = array_map(fn ($r) => "{$r['sku']} (pedidas {$r['requested']}, disponibles {$r['available']})", $insufficient);
+            return [
+                'error_code' => 'ERR_STOCK_INSUFICIENTE',
+                'details'    => ['insufficient_stock' => $insufficient],
+                'message'    => 'Pedido rechazado: stock insuficiente en ' . implode(', ', $parts),
+            ];
+        }
+        return null;
     }
 
     /** Número de un payload JSON (int, float o texto numérico), o null si falta o no es numérico. */
