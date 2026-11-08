@@ -22,11 +22,12 @@
 
 ```powershell
 cd backoffice
+cp .env.example .env   # y pon valores propios: INTEGRATION_API_KEY, WEBHOOK_HMAC_SECRET y ERP_ADMIN_PASSWORD_HASH
 php -S 127.0.0.1:8080 -t public public/index.php
 ```
 Acceder en el navegador a: **http://127.0.0.1:8080**
 
-Para ejecutar los tests automáticos de integración y validación:
+Para ejecutar los tests automáticos de integración y validación (usan una base de datos temporal propia):
 ```powershell
 php backoffice/tests/verify_backoffice.php
 ```

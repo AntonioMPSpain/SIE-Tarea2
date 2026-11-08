@@ -1,6 +1,6 @@
 -- =========================================================================
 -- ESQUEMA DE BASE DE DATOS INDEPENDIENTE DEL BACK-OFFICE (PIQUANTUM ERP)
--- Compatible con SQLite 3 y MySQL / MariaDB
+-- SQLite 3 (usa AUTOINCREMENT, INSERT OR REPLACE y julianday(): no es compatible con MySQL tal cual)
 -- =========================================================================
 
 CREATE TABLE IF NOT EXISTS erp_customers (

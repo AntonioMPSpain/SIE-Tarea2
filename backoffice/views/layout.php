@@ -396,7 +396,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 <div class="card-glass rounded-xl p-10 text-center space-y-3">
                     <div class="text-4xl">📭</div>
                     <h3 class="text-base font-bold text-white">Back-Office sin pedidos integrados (Estado "Antes de la Integración")</h3>
-                    <p class="text-xs text-slate-400 max-w-lg mx-auto">Esta vista sirve como evidencia previa a la ejecución del flujo de n8n. Envía un pedido desde n8n o pulsa "Cargar Estado DESPUÉS de Integración" arriba a la derecha.</p>
+                    <p class="text-xs text-slate-400 max-w-lg mx-auto">Esta vista sirve como evidencia previa a la ejecución del flujo de n8n. Los pedidos aparecen aquí cuando llegan desde la tienda a través de n8n (no hay datos de demostración).</p>
                 </div>
             <?php else: ?>
                 <div class="space-y-4">

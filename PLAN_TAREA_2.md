@@ -57,7 +57,7 @@ flowchart LR
 
 ## 2. Módulos y Base de Datos del Back-Office Propio (`erp.piquantum.onl`)
 
-El sistema de Back-Office tendrá su propio login independiente y contará con **6 tablas propias** en su base de datos (`piquantum_erp_db`):
+El sistema de Back-Office tiene su propio login independiente y cuenta con **9 tablas propias** en su base de datos (`piquantum_erp_db`; en la implementación, SQLite en `storage/database/piquantum_erp.sqlite`):
 
 | Tabla en `piquantum_erp_db` | Propósito en la Tarea 2 |
 |---|---|
@@ -66,7 +66,9 @@ El sistema de Back-Office tendrá su propio login independiente y contará con *
 | `erp_inventory` | Control de stock de almacén por SKU de salsa picante y tamaño, umbral de stock mínimo y prioridad de reposición. |
 | `erp_tickets` | Incidencias postventa, consultas o devoluciones asociadas a un cliente y a un `order_ref`, con estado (`abierta`, `en_revision_ia`, `aprobada`, `resuelta`, `rechazada`), prioridad y timestamps para calcular el tiempo medio de resolución. |
 | `erp_integration_logs` | **Evidencia de Trazabilidad (Apartado 3.e y 3.f):** registra cada ejecución del flujo (`execution_id`, escenario, evento origen, dirección, payload recibido, resultado `SUCCESS` o `ERROR`, código de error y mensaje de validación). |
-| `erp_ai_audits` | **Evidencia de IA Agéntica y Supervisión Humana (Apartado 6):** guarda la salida estructurada de 7 campos del Agente IA, las herramientas invocadas, el estado (`pendiente_de_revision`, `aprobado`, `rechazado`), el usuario supervisor y la fecha de decisión. |
+| `erp_ai_audits` | **Evidencia de IA Agéntica y Supervisión Humana (Apartado 6):** guarda la salida estructurada de 7 campos del Agente IA, las herramientas invocadas, el estado (`pendiente_de_revision`, `aprobado`, `rechazado`), el usuario supervisor, la fecha de decisión y si n8n confirmó la notificación por Telegram. |
+| `erp_processed_events` | **Idempotencia:** `event_id` de los eventos de la tienda ya procesados; un evento repetido se responde como `duplicate`. |
+| `erp_outbox_webhooks` | **Bandeja de salida hacia n8n:** avisos de cambios del Back-Office (Escenario 2) y de aprobaciones (Escenario 3), con su estado de entrega y los reintentos. |
 
 ---
 
@@ -76,7 +78,7 @@ Cada workflow en **n8n** cumplirá los elementos obligatorios del Apartado 4:
 `Disparador Webhook` → `Validación de Payload y Firma HMAC` → `Rama Correcta (Transformación + Llamada API Back-Office + Log OK)` / `Rama de Error o Datos Incompletos (Log de Fallo + Alerta)` → `Notificación / Seguimiento`.
 
 ### Escenario 1: Pedido generado e integrado (`order.created` / `payment.simulated`)
-1. **Origen (Canal Digital):** Un cliente de prueba (`laura@example.com`) realiza un pedido en Piquantum y completa el pago en el TPV Redsys de pruebas (o transferencia simulada).
+1. **Origen (Canal Digital):** Un cliente de prueba (`laura@example.com`) realiza un pedido en Piquantum y completa el pago en el TPV Redsys de pruebas (entorno *sandbox* oficial; en la demo no se usa ningún otro método de pago).
 2. **Envío:** Piquantum dispara automáticamente un Webhook HTTP POST a n8n con el contrato JSON del pedido.
 3. **Procesamiento en n8n:**
    - **Validación:** Comprueba firma `X-Piquantum-Signature` y campos obligatorios (`order_ref`, `customer.email`, `items` no vacío, `total > 0`, `status`).
@@ -146,9 +148,9 @@ Integrado en la ruta `/dashboard` de nuestro Back-Office (`erp.piquantum.onl/das
 2. **Importe total simulado (€)** acumulado y ticket medio de pedido.
 3. **Productos y formatos más solicitados** (Gráfico horizontal con el top de salsas picantes vendidas).
 4. **Pedidos por estado** (Gráfico Donut: *Pagado, En preparación, Enviado, Con incidencia, Cancelado*).
-5. **Incidencias abiertas vs. resueltas** y **Tiempo medio simulado de resolución (MTTR)**.
+5. **Incidencias abiertas vs. resueltas** y **Tiempo medio de resolución (MTTR)** real (`resolved_at − created_at`).
 6. **Eventos de integración correctos vs. fallidos** (`SUCCESS` vs `ERROR` en `erp_integration_logs`) + **Desglose de errores por tipo** (`Validación`, `Autenticación`, `Entidad no encontrada`).
-7. **Tasa de conversión del flujo (Funnel):** relación entre `checkout.started` → `order.created` → `payment.simulated` → `integrado en Back-Office`.
+7. **Tasa de conversión del flujo (Funnel):** solo con etapas que recibe el Back-Office: pedidos integrados → pagados → con incidencia postventa. El Back-Office no recibe `product.viewed`, `cart.item_added` ni `checkout.started`, así que esas etapas no se muestran.
 8. **Métrica de Gobernanza de IA Agéntica:** Total de acciones propuestas por el agente vs. acciones aprobadas y rechazadas por el supervisor humano.
 
 ---
@@ -168,7 +170,7 @@ Para cumplir con el **Apartado 11 (commits verificables de los 3 miembros)** y e
 ## 7. Hoja de Ruta Paso a Paso (Orden de Implementación)
 
 - **Paso 1 — Estructura del Repositorio:** Crear la carpeta `backoffice/` (para la nueva app de Back-Office independiente), `n8n/workflows/` (para los JSON de n8n), `n8n/payloads/` (para los 3 payloads obligatorios + 1 de error) y `deploy/` (con el `docker-compose.yml` de la VM de Google Cloud).
-- **Paso 2 — Desarrollo del Back-Office Ligero (`backoffice/`):** Crear las migraciones de las 6 tablas (`erp_customers`, `erp_orders`, `erp_order_items`, `erp_inventory`, `erp_tickets`, `erp_integration_logs`, `erp_ai_audits`), la API REST para n8n y las vistas del Panel Operativo y Cuadro de Mando.
+- **Paso 2 — Desarrollo del Back-Office Ligero (`backoffice/`):** Crear las 9 tablas (`erp_customers`, `erp_orders`, `erp_order_items`, `erp_inventory`, `erp_tickets`, `erp_integration_logs`, `erp_ai_audits`, `erp_processed_events`, `erp_outbox_webhooks`), la API REST para n8n y las vistas del Panel Operativo y Cuadro de Mando.
 - **Paso 3 — Conector en el eCommerce (`backend/` de Tarea 1):** Añadir el envío de webhook a n8n en `EventLogger` y el endpoint receptor de cambios de estado desde el Back-Office.
 - **Paso 4 — Despliegue en la VM de Google Cloud:** Subir el `docker-compose.yml` con n8n + el Back-Office + su BD independiente y configurar los subdominios con HTTPS.
 - **Paso 5 — Configuración de los Workflows en n8n + Bot de Telegram + Agente Gemini:** Conectar los 3 escenarios, probar con los usuarios de prueba (`laura@example.com`, etc.), verificar la rama de error y exportar los workflows a Git.
