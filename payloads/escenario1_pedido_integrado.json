@@ -5,30 +5,27 @@
   "occurred_at": "2026-11-08T18:30:00Z",
   "status": "pagado_simulado",
   "payment_method": "redsys_sandbox",
-  "discount_code": "BIENVENIDA10",
-  "shipping_address": "Gran Vía Escultor Salzillo 18, 30004 Murcia",
+  "shipping_address": "Calle Ficticia 1, 28001 Madrid",
   "customer": {
-    "id": "USR-LAURA-01",
-    "name": "Laura Gómez (Cliente Prueba)",
-    "email": "laura@example.com",
-    "phone": "+34 600 111 222"
+    "name": "Laura Prueba",
+    "email": "laura@example.com"
   },
   "items": [
     {
-      "sku": "PQ-HAB-200",
-      "product_name": "Lágrima de Habanero Rojo",
-      "variant_size": "200ml",
+      "sku": "SAL-002-100ML",
+      "product_name": "Salsa Chipotle Ahumado",
+      "variant_size": "100 ml",
       "quantity": 2,
-      "unit_price": 17.50
+      "unit_price": 6.5
     },
     {
-      "sku": "PQ-MNG-100",
-      "product_name": "Néctar Tropical Mango & Habanero",
-      "variant_size": "100ml",
+      "sku": "SAL-005",
+      "product_name": "Salsa Habanero Mango",
+      "variant_size": null,
       "quantity": 1,
-      "unit_price": 11.50
+      "unit_price": 8.9
     }
   ],
   "shipping_amount": 4.95,
-  "total_amount": 51.45
+  "total_amount": 26.85
 }

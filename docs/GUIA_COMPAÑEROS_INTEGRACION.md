@@ -122,7 +122,7 @@ Conecta estos **3 nodos `HTTP Request Tool`** al nodo **AI Agent** de n8n:
    - **Descripción para el Agente:** *"Consulta en el Back-Office los detalles de un pedido por su referencia (ej. PQ-20261108-A901BC), incluyendo estado de pago, líneas compradas, historial de incidencias previas del cliente y stock disponible de cada producto."*
    - **Método y URL:** `GET http://backoffice:8080/api/v1/agent/orders/{order_ref}`
 2. **Tool de Consulta 2 — `consultar_disponibilidad_almacen`:**
-   - **Descripción para el Agente:** *"Consulta las unidades disponibles en el almacén y ubicación de pasillo para un SKU de salsa picante (ej. PQ-HAB-200, PQ-GHO-100)."*
+   - **Descripción para el Agente:** *"Consulta las unidades disponibles en el almacén y ubicación de pasillo para un SKU de salsa picante (ej. SAL-002-100ML, SAL-007). Códigos: SKU-TAMAÑO sin espacios en mayúsculas, o solo el SKU si el producto no tiene tamaños."*
    - **Método y URL:** `GET http://backoffice:8080/api/v1/agent/inventory/{sku}`
 3. **Tool de Acción/Propuesta — `proponer_resolucion_ticket`:**
    - **Descripción para el Agente:** *"Registra en el Back-Office la propuesta estructurada de resolución del ticket en estado pendiente_de_revision para que un supervisor humano la apruebe antes de notificar al cliente por Telegram."*

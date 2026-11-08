@@ -339,7 +339,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 new Chart(document.getElementById('chartTopProducts'), {
                     type: 'bar',
                     data: {
-                        labels: topProducts.length ? topProducts.map(p => p.sku + ' (' + p.variant_size + ')') : ['Sin ventas'],
+                        labels: topProducts.length ? topProducts.map(p => p.sku) : ['Sin ventas'],
                         datasets: [{
                             label: 'Unidades solicitadas',
                             data: topProducts.length ? topProducts.map(p => Number(p.total_units)) : [0],
@@ -456,7 +456,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                             <tr>
                                                 <td class="py-2 font-mono text-amber-300"><?= htmlspecialchars($line['sku']) ?></td>
                                                 <td class="py-2 text-slate-200 font-medium"><?= htmlspecialchars($line['product_name']) ?></td>
-                                                <td class="py-2 text-slate-400"><?= htmlspecialchars($line['variant_size']) ?></td>
+                                                <td class="py-2 text-slate-400"><?= htmlspecialchars((string) ($line['variant_size'] ?? '—')) ?></td>
                                                 <td class="py-2 text-right font-mono"><?= (int) $line['quantity'] ?></td>
                                                 <td class="py-2 text-right font-mono"><?= number_format((float) $line['unit_price'], 2, ',', '.') ?> €</td>
                                                 <td class="py-2 text-right font-mono font-semibold text-white"><?= number_format((float) $line['line_total'], 2, ',', '.') ?> €</td>
@@ -531,7 +531,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                         <?= htmlspecialchars($item['product_name']) ?>
                                         <span class="ml-1 text-rose-400"><?= str_repeat('🌶️', (int) $item['heat_level']) ?></span>
                                     </td>
-                                    <td class="p-3 text-slate-300"><?= htmlspecialchars($item['category']) ?> · <span class="font-mono"><?= htmlspecialchars($item['variant_size']) ?></span></td>
+                                    <td class="p-3 text-slate-300"><?= htmlspecialchars($item['category']) ?> · <span class="font-mono"><?= htmlspecialchars((string) ($item['variant_size'] ?? 'tamaño único')) ?></span></td>
                                     <td class="p-3 font-mono text-slate-400"><?= htmlspecialchars($item['warehouse_location']) ?></td>
                                     <td class="p-3 text-right font-mono"><?= number_format((float) $item['unit_price'], 2, ',', '.') ?> €</td>
                                     <td class="p-3 text-center">
@@ -837,18 +837,17 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                             occurred_at: "2026-11-08T19:30:00Z",
                             status: "pagado_simulado",
                             payment_method: "redsys_sandbox",
-                            shipping_address: "Calle Trapería 10, 30001 Murcia",
+                            shipping_address: "Avenida de Prueba 22, 41001 Sevilla",
                             customer: {
-                                id: "USR-LAURA-01",
-                                name: "Laura Gómez (Cliente Prueba)",
-                                email: "laura@example.com",
-                                phone: "+34 600 111 222"
+                                name: "Carlos Demo",
+                                email: "carlos@example.com"
                             },
                             items: [
-                                { sku: "PQ-HAB-200", product_name: "Lágrima de Habanero Rojo", variant_size: "200ml", quantity: 1, unit_price: 17.50 },
-                                { sku: "PQ-JAL-100", product_name: "Brisa Verde de Jalapeño y Lima", variant_size: "100ml", quantity: 2, unit_price: 8.90 }
+                                { sku: "SAL-001-100ML", product_name: "Salsa Carolina Reaper Inferno", variant_size: "100 ml", quantity: 1, unit_price: 12.90 },
+                                { sku: "SAL-003", product_name: "Salsa Verde Jalapeño & Lima", variant_size: null, quantity: 2, unit_price: 5.90 }
                             ],
-                            total_amount: 35.30
+                            shipping_amount: 4.95,
+                            total_amount: 29.65
                         }
                     },
                     order_error: {
@@ -867,7 +866,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                         body: {
                             execution_id: "exec_live_sync_02",
                             change_type: "ORDER_STATUS",
-                            order_ref: "PQ-20261108-F622LM",
+                            order_ref: "PQ-20261108-LIVE99",
                             new_status: "enviado",
                             priority: "URGENTE",
                             direction: "n8n Workflow -> BackOffice"
@@ -879,12 +878,12 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                             execution_id: "exec_live_inc_03",
                             event_type: "support.requested",
                             ticket_ref: "INC-20261108-9901",
-                            order_ref: "PQ-20261108-F622LM",
-                            customer_name: "Marta Hernández (Cliente Prueba)",
-                            customer_email: "marta@example.com",
+                            order_ref: "PQ-20261108-LIVE99",
+                            customer_name: "Carlos Demo",
+                            customer_email: "carlos@example.com",
                             telegram_chat_id: "@marta_piquantum_test",
-                            subject: "Duda sobre conservación refrigerada de Néctar Mango & Habanero",
-                            description: "Hola, acabo de recibir el pedido PQ-20261108-F622LM y quería confirmar si una vez abierto el bote de Mango & Habanero debo conservarlo siempre en frío o si puedo devolver una unidad sin abrir.",
+                            subject: "Duda sobre la conservación de la Salsa Verde Jalapeño & Lima",
+                            description: "Hola, acabo de recibir el pedido PQ-20261108-LIVE99 y quería saber si la Salsa Verde Jalapeño & Lima hay que conservarla en frío una vez abierta.",
                             priority: "MEDIA"
                         }
                     }

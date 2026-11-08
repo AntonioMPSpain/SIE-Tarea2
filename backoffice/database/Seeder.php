@@ -9,21 +9,31 @@ use Piquantum\BackOffice\Config\Database;
 
 class Seeder
 {
+    /**
+     * Catálogo inicial = catálogo real de la tienda (Tarea 1, www.piquantum.onl).
+     * Código: SKU-TAMAÑO sin espacios en mayúsculas, o solo el SKU si el producto no tiene tamaños.
+     * Precios con IVA incluido y stock inicial del seeder de la Tarea 1 (comprobar el stock real en el /admin de la tienda;
+     * lo correcto es cargarlo desde la tienda con POST /api/v1/inventory/import).
+     * heat_level, min_stock_threshold y warehouse_location NO existen en la tienda: son datos propios del almacén del Back-Office.
+     *
+     * Columnas: [sku, product_name, category, variant_size, heat_level, unit_price, stock, min_stock_threshold, warehouse_location]
+     */
     public static function getCatalogItems(): array
     {
         return [
-            ['PQ-HAB-050', 'Lágrima de Habanero Rojo', 'Picante Alto', '50ml', 4, 6.50, 28, 5, 'PASILLO-A1'],
-            ['PQ-HAB-100', 'Lágrima de Habanero Rojo', 'Picante Alto', '100ml', 4, 10.90, 22, 5, 'PASILLO-A1'],
-            ['PQ-HAB-200', 'Lágrima de Habanero Rojo', 'Picante Alto', '200ml', 4, 17.50, 16, 5, 'PASILLO-A2'],
-            ['PQ-JAL-100', 'Brisa Verde de Jalapeño y Lima', 'Suave', '100ml', 2, 8.90, 35, 8, 'PASILLO-B1'],
-            ['PQ-JAL-200', 'Brisa Verde de Jalapeño y Lima', 'Suave', '200ml', 2, 14.50, 19, 6, 'PASILLO-B1'],
-            ['PQ-CHP-100', 'Chipotle Ahumado al Roble', 'Medio-Ahumado', '100ml', 3, 9.90, 24, 5, 'PASILLO-B2'],
-            ['PQ-MNG-100', 'Néctar Tropical Mango & Habanero', 'Frutal-Picante', '100ml', 3, 11.50, 30, 6, 'PASILLO-C1'],
-            ['PQ-CAR-050', 'Elixir Carolina Reaper Extremo', 'Extremo', '50ml', 5, 14.90, 4, 5, 'PASILLO-Z9'],
-            ['PQ-CAR-100', 'Elixir Carolina Reaper Extremo', 'Extremo', '100ml', 5, 22.90, 9, 5, 'PASILLO-Z9'],
-            ['PQ-GHO-100', 'Fuego Fantasma Bhut Jolokia', 'Extremo', '100ml', 5, 19.50, 12, 5, 'PASILLO-Z8'],
-            ['PQ-SRIR-200', 'Sriracha Artesanal Fermentada', 'Medio', '200ml', 3, 12.90, 26, 6, 'PASILLO-C2'],
-            ['PQ-PACK-DEG', 'Trilogía Degustación Piquantum', 'Packs', '3x50ml', 4, 21.00, 14, 4, 'PASILLO-D1'],
+            ['SAL-001-50ML',  'Salsa Carolina Reaper Inferno', 'extremas', '50 ml',  5,  8.90, 15, 5, 'PASILLO-C1'],
+            ['SAL-001-100ML', 'Salsa Carolina Reaper Inferno', 'extremas', '100 ml', 5, 12.90, 10, 5, 'PASILLO-C1'],
+            ['SAL-001-200ML', 'Salsa Carolina Reaper Inferno', 'extremas', '200 ml', 5, 18.50,  5, 3, 'PASILLO-C1'],
+            ['SAL-002-50ML',  'Salsa Chipotle Ahumado',        'suaves',   '50 ml',  2,  4.50, 30, 5, 'PASILLO-A1'],
+            ['SAL-002-100ML', 'Salsa Chipotle Ahumado',        'suaves',   '100 ml', 2,  6.50, 20, 5, 'PASILLO-A1'],
+            ['SAL-002-200ML', 'Salsa Chipotle Ahumado',        'suaves',   '200 ml', 2,  9.90, 10, 5, 'PASILLO-A1'],
+            ['SAL-003',       'Salsa Verde Jalapeño & Lima',   'suaves',   null,     1,  5.90, 80, 10, 'PASILLO-A2'],
+            ['SAL-004',       'Sriracha Artesana',             'picantes', null,     2,  7.20, 70, 10, 'PASILLO-B1'],
+            ['SAL-005',       'Salsa Habanero Mango',          'picantes', null,     4,  8.90, 45, 8, 'PASILLO-B2'],
+            ['SAL-006',       'Salsa Scotch Bonnet Caribe',    'picantes', null,     4,  9.50, 35, 8, 'PASILLO-B3'],
+            ['SAL-007',       'Salsa Ghost Pepper Bhut',       'extremas', null,     5, 11.90, 25, 5, 'PASILLO-C2'],
+            ['SAL-008',       'Pack Iniciación al Picante',    'packs',    null,     3, 19.90, 20, 5, 'PASILLO-D1'],
+            ['SAL-009',       'Pack Desafío Extrem',           'packs',    null,     5, 22.90, 15, 5, 'PASILLO-D1'],
         ];
     }
 

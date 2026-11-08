@@ -9,6 +9,9 @@ use PDOException;
 
 class Database
 {
+    /** Versión de database/schema.sql (PRAGMA user_version). Subirla en cada cambio del esquema. */
+    public const SCHEMA_VERSION = 2;
+
     private static ?PDO $pdo = null;
     private static array $env = [];
 
@@ -97,6 +100,14 @@ class Database
         // Comprobar si la tabla erp_inventory ya existe
         try {
             $pdo->query('SELECT 1 FROM erp_inventory LIMIT 1');
+            // Base de datos ya creada: tiene que ser de la versión de esquema actual
+            $version = (int) $pdo->query('PRAGMA user_version')->fetchColumn();
+            if ($version !== self::SCHEMA_VERSION) {
+                throw new \RuntimeException(
+                    "La base de datos del Back-Office tiene un esquema antiguo (versión {$version}; se espera la "
+                    . self::SCHEMA_VERSION . '). En desarrollo, borra el archivo .sqlite para que se cree de nuevo.'
+                );
+            }
         } catch (PDOException) {
             $schemaFile = dirname(__DIR__) . '/database/schema.sql';
             if (file_exists($schemaFile)) {

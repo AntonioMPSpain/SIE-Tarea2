@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS erp_order_items (
     order_id INTEGER NOT NULL,
     sku VARCHAR(64) NOT NULL,
     product_name VARCHAR(160) NOT NULL,
-    variant_size VARCHAR(30) NOT NULL DEFAULT '100ml',
+    variant_size VARCHAR(30) NULL,
     quantity INTEGER NOT NULL,
     unit_price DECIMAL(10,2) NOT NULL,
     line_total DECIMAL(10,2) NOT NULL,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS erp_inventory (
     sku VARCHAR(64) NOT NULL UNIQUE,
     product_name VARCHAR(160) NOT NULL,
     category VARCHAR(80) NOT NULL,
-    variant_size VARCHAR(30) NOT NULL,
+    variant_size VARCHAR(30) NULL,
     heat_level INTEGER NOT NULL DEFAULT 3,
     unit_price DECIMAL(10,2) NOT NULL,
     stock_available INTEGER NOT NULL DEFAULT 0,
@@ -123,3 +123,6 @@ CREATE TABLE IF NOT EXISTS erp_integration_logs (
     execution_ms INTEGER NOT NULL DEFAULT 18,
     created_at DATETIME NOT NULL
 );
+
+-- Versión del esquema: Database::SCHEMA_VERSION debe coincidir (si no, hay que recrear la base de datos)
+PRAGMA user_version = 2;
