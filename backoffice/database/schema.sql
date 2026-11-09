@@ -1,6 +1,6 @@
 -- =========================================================================
 -- ESQUEMA DE BASE DE DATOS INDEPENDIENTE DEL BACK-OFFICE (PIQUANTUM ERP)
--- Compatible con SQLite 3 y MySQL / MariaDB
+-- SQLite 3 (usa AUTOINCREMENT, INSERT OR REPLACE y julianday(): no es compatible con MySQL tal cual)
 -- =========================================================================
 
 CREATE TABLE IF NOT EXISTS erp_customers (
@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS erp_orders (
     tax_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     shipping_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     discount_code VARCHAR(50) NULL,
+    discount_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     total_amount DECIMAL(10,2) NOT NULL,
-    payment_method VARCHAR(50) NOT NULL DEFAULT 'redsys_sandbox',
+    payment_method VARCHAR(50) NULL,
     payment_status VARCHAR(40) NOT NULL DEFAULT 'pagado_simulado',
     order_status VARCHAR(40) NOT NULL DEFAULT 'pendiente_preparacion',
     priority VARCHAR(30) NOT NULL DEFAULT 'NORMAL',
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS erp_order_items (
     order_id INTEGER NOT NULL,
     sku VARCHAR(64) NOT NULL,
     product_name VARCHAR(160) NOT NULL,
-    variant_size VARCHAR(30) NOT NULL DEFAULT '100ml',
+    variant_size VARCHAR(30) NULL,
     quantity INTEGER NOT NULL,
     unit_price DECIMAL(10,2) NOT NULL,
     line_total DECIMAL(10,2) NOT NULL,
@@ -57,7 +58,7 @@ CREATE TABLE IF NOT EXISTS erp_inventory (
     sku VARCHAR(64) NOT NULL UNIQUE,
     product_name VARCHAR(160) NOT NULL,
     category VARCHAR(80) NOT NULL,
-    variant_size VARCHAR(30) NOT NULL,
+    variant_size VARCHAR(30) NULL,
     heat_level INTEGER NOT NULL DEFAULT 3,
     unit_price DECIMAL(10,2) NOT NULL,
     stock_available INTEGER NOT NULL DEFAULT 0,
@@ -82,15 +83,14 @@ CREATE TABLE IF NOT EXISTS erp_tickets (
     status VARCHAR(40) NOT NULL DEFAULT 'ABIERTA',
     resolution_notes TEXT NULL,
     created_at DATETIME NOT NULL,
-    resolved_at DATETIME NULL,
-    simulated_resolution_minutes INTEGER NULL
+    resolved_at DATETIME NULL
 );
 
 CREATE TABLE IF NOT EXISTS erp_ai_audits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_ref VARCHAR(64) NOT NULL,
     order_ref VARCHAR(64) NULL,
-    agent_model VARCHAR(80) NOT NULL DEFAULT 'gemini-2.5-flash (n8n AI Agent)',
+    agent_model VARCHAR(80) NULL,
     tools_invoked TEXT NOT NULL,
     -- Los 7 campos obligatorios de la salida estructurada (Apartado 6)
     detected_case_type VARCHAR(100) NOT NULL,
@@ -125,9 +125,32 @@ CREATE TABLE IF NOT EXISTS erp_integration_logs (
     created_at DATETIME NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS erp_funnel_counters (
-    event_name VARCHAR(80) PRIMARY KEY,
-    event_label VARCHAR(120) NOT NULL,
-    total_count INTEGER NOT NULL DEFAULT 0,
-    updated_at DATETIME NOT NULL
+-- Idempotencia: eventos ya procesados (event_id de la tienda). Un evento repetido se responde como «duplicate».
+CREATE TABLE IF NOT EXISTS erp_processed_events (
+    event_id VARCHAR(100) PRIMARY KEY,
+    event_type VARCHAR(80) NOT NULL,
+    entity_ref VARCHAR(80) NOT NULL,
+    processed_at DATETIME NOT NULL
 );
+
+-- Bandeja de salida hacia n8n (outbox): primero se guarda el cambio y su aviso, después se envía.
+-- Los avisos que n8n no confirma (2xx) quedan PENDIENTE y se reintentan con el mismo cuerpo y event_id.
+CREATE TABLE IF NOT EXISTS erp_outbox_webhooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id VARCHAR(100) NOT NULL UNIQUE,
+    event_type VARCHAR(80) NOT NULL,
+    target_env_key VARCHAR(80) NOT NULL,
+    body_json TEXT NOT NULL,
+    entity_type VARCHAR(30) NOT NULL,
+    entity_ref VARCHAR(80) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_http_code INTEGER NULL,
+    last_error TEXT NULL,
+    created_at DATETIME NOT NULL,
+    last_attempt_at DATETIME NULL,
+    sent_at DATETIME NULL
+);
+
+-- Versión del esquema: Database::SCHEMA_VERSION debe coincidir (si no, hay que recrear la base de datos)
+PRAGMA user_version = 6;

@@ -12,15 +12,15 @@
   "datos_consultados": {
     "order_ref": "PQ-20261108-A901BC",
     "estado_pedido": "enviado",
-    "importe_pedido": 51.45,
-    "sku_afectado": "PQ-HAB-200",
-    "stock_disponible_sku": 14,
+    "importe_pedido": 24.66,
+    "sku_afectado": "SAL-002-100ML",
+    "stock_disponible_sku": 18,
     "incidencias_previas_cliente": 0,
-    "segmento_cliente": "VIP_PICANTE"
+    "segmento_cliente": "ESTANDAR"
   },
-  "accion_propuesta": "GENERAR_ENVIO_REPOSICION_1_UD_PQ-HAB-200_Y_NOTIFICAR_TELEGRAM",
-  "mensaje_propuesto_telegram": "🌶️ Hola Laura: Hemos revisado la incidencia INC-20261108-3045 de tu pedido PQ-20261108-A901BC. Confirmamos disponibilidad en almacén de Lágrima de Habanero Rojo (200ml) y nuestro supervisor ha autorizado el envío inmediato de 1 unidad de reemplazo sin coste.",
-  "justificacion_breve": "El pedido consta pagado y entregado hace menos de 48h, la clienta no tiene reclamaciones previas registradas y existen 14 unidades disponibles en el pasillo A2 del almacén.",
+  "accion_propuesta": "GENERAR_ENVIO_REPOSICION_1_UD_SAL-002-100ML_Y_NOTIFICAR_TELEGRAM",
+  "mensaje_propuesto_telegram": "🌶️ Hola Laura: hemos revisado la incidencia INC-20261108-3045 de tu pedido PQ-20261108-A901BC. Tenemos Salsa Chipotle Ahumado de 100 ml disponible en almacén y nuestro supervisor ha autorizado el envío de 1 unidad de reposición sin coste.",
+  "justificacion_breve": "El pedido consta pagado y enviado, la clienta no tiene reclamaciones previas y hay 18 unidades disponibles de SAL-002-100ML en el pasillo A1 del almacén.",
   "nivel_confianza_o_prioridad": "Confianza: 0.95 (95%) | Prioridad: ALTA",
   "riesgos_o_advertencias": "Acción sensible: implica salida de inventario gratuita y notificación externa al cliente vía Telegram. Queda bloqueada en modo propuesta hasta aprobación explícita de un operador humano.",
   "estado_final": "pendiente_de_revision"

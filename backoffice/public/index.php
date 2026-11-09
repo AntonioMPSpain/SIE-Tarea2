@@ -44,6 +44,23 @@ if (PHP_SAPI === 'cli-server') {
     }
 }
 
+// Sin los secretos obligatorios la aplicación no arranca (nunca con valores por defecto ni con los de .env.example)
+$missingSecrets = \Piquantum\BackOffice\Config\Database::missingRequiredSecrets();
+if (!empty($missingSecrets)) {
+    $msg = 'Configuración incompleta del Back-Office: faltan ' . implode(', ', $missingSecrets)
+        . ' (o tienen el valor de ejemplo «cambia-esto»). Defínelas en backoffice/.env o como variables de entorno.';
+    error_log($msg);
+    http_response_code(500);
+    if (str_starts_with($requestUri, '/api/')) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'error_code' => 'ERR_CONFIGURACION', 'message' => $msg], JSON_UNESCAPED_UNICODE);
+    } else {
+        header('Content-Type: text/plain; charset=utf-8');
+        echo $msg;
+    }
+    exit;
+}
+
 if (str_starts_with($requestUri, '/api/')) {
     $api = new \Piquantum\BackOffice\Controllers\ApiController();
     $api->handle($method, $requestUri);

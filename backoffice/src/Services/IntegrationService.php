@@ -10,6 +10,19 @@ use Throwable;
 
 class IntegrationService
 {
+    /** Estados de pedido del contrato (los mismos que Order de la tienda, Tarea 1). */
+    public const ORDER_STATUSES = ['creado', 'pagado_simulado', 'pendiente_preparacion', 'enviado', 'cancelado', 'incidencia'];
+
+    /** Transiciones permitidas desde cada estado: misma tabla que Order::TRANSITIONS de la tienda (Tarea 1). */
+    public const ORDER_TRANSITIONS = [
+        'creado'                => ['cancelado', 'incidencia'],
+        'pagado_simulado'       => ['pendiente_preparacion', 'cancelado', 'incidencia'],
+        'pendiente_preparacion' => ['enviado', 'cancelado', 'incidencia'],
+        'enviado'               => ['incidencia'],
+        'incidencia'            => ['pendiente_preparacion', 'cancelado'],
+        'cancelado'             => [],
+    ];
+
     private PDO $db;
 
     public function __construct(?PDO $db = null)
@@ -26,14 +39,41 @@ class IntegrationService
         $executionId = $payload['execution_id'] ?? ('exec_' . bin2hex(random_bytes(5)));
         $eventType = (string) ($payload['event_type'] ?? 'order.created');
 
-        // 1. Validación estricta de campos obligatorios (Apartado 3.b y 4.b)
-        $missingFields = [];
-        $orderRef = trim((string) ($payload['order_ref'] ?? ''));
-        $customerEmail = trim((string) ($payload['customer']['email'] ?? ''));
-        $customerName = trim((string) ($payload['customer']['name'] ?? ''));
-        $items = $payload['items'] ?? [];
-        $totalAmount = isset($payload['total_amount']) ? (float) $payload['total_amount'] : -1.0;
+        // Catálogo de estados del contrato y su normalización (Apartado 3.c)
+        $statusMap = [
+            'created'               => 'creado',
+            'creado'                => 'creado',
+            'paid'                  => 'pendiente_preparacion',
+            'pagado_simulado'       => 'pendiente_preparacion',
+            'pendiente_preparacion' => 'pendiente_preparacion',
+            'shipped'               => 'enviado',
+            'enviado'               => 'enviado',
+            'cancelled'             => 'cancelado',
+            'cancelado'             => 'cancelado',
+            'incidencia'            => 'incidencia',
+        ];
 
+        // 1. Validación estricta de campos obligatorios (Apartado 3.b y 4.b).
+        //    Nada se rellena con valores inventados: si falta un obligatorio, se rechaza; los opcionales quedan a NULL.
+        $missingFields = [];
+        $eventId = trim((string) ($payload['event_id'] ?? ''));
+        $orderRef = trim((string) ($payload['order_ref'] ?? ''));
+        $customer = is_array($payload['customer'] ?? null) ? $payload['customer'] : [];
+        $customerEmail = trim((string) ($customer['email'] ?? ''));
+        $customerName = trim((string) ($customer['name'] ?? ''));
+        $items = $payload['items'] ?? [];
+        $rawStatus = strtolower(trim((string) ($payload['status'] ?? '')));
+        $occurredAtRaw = trim((string) ($payload['occurred_at'] ?? ''));
+        $occurredTs = $occurredAtRaw !== '' ? strtotime($occurredAtRaw) : false;
+        $totalAmount = $this->numberOrNull($payload['total_amount'] ?? null);
+        $shippingAmount = $this->numberOrNull($payload['shipping_amount'] ?? null);
+        $discountCode = $this->stringOrNull($payload['discount_code'] ?? null);
+        $discountRaw = $payload['discount_amount'] ?? null;
+        $discountAmount = $discountRaw === null ? null : $this->numberOrNull($discountRaw);
+
+        if ($eventId === '') {
+            $missingFields[] = 'event_id (identificador único del evento de la tienda)';
+        }
         if ($orderRef === '') {
             $missingFields[] = 'order_ref';
         }
@@ -43,18 +83,45 @@ class IntegrationService
         if ($customerName === '') {
             $missingFields[] = 'customer.name';
         }
+        if (!isset($statusMap[$rawStatus])) {
+            $missingFields[] = 'status (valores admitidos: ' . implode(', ', array_keys($statusMap)) . ')';
+        }
+        if ($occurredTs === false) {
+            $missingFields[] = 'occurred_at (fecha ISO 8601)';
+        }
+        if ($shippingAmount === null || $shippingAmount < 0) {
+            $missingFields[] = 'shipping_amount (número >= 0)';
+        }
+        // discount_amount: importe del descuento (IVA incluido). Obligatorio si hay discount_code; sin código, 0.
+        if ($discountRaw !== null && ($discountAmount === null || $discountAmount < 0)) {
+            $missingFields[] = 'discount_amount (número >= 0)';
+        } elseif ($discountCode !== null && $discountAmount === null) {
+            $missingFields[] = 'discount_amount (obligatorio si hay discount_code)';
+        }
         if (!is_array($items) || count($items) === 0) {
             $missingFields[] = 'items[] (mínimo 1 línea de pedido)';
         }
-        if ($totalAmount <= 0) {
+        if ($totalAmount === null || $totalAmount <= 0) {
             $missingFields[] = 'total_amount (debe ser > 0)';
         }
 
         // Validar estructura de cada línea de pedido
         if (is_array($items)) {
             foreach ($items as $idx => $item) {
-                if (empty($item['sku']) || empty($item['quantity']) || (int) $item['quantity'] <= 0) {
-                    $missingFields[] = "items[{$idx}].sku / quantity";
+                $item = is_array($item) ? $item : [];
+                if (trim((string) ($item['sku'] ?? '')) === '') {
+                    $missingFields[] = "items[{$idx}].sku";
+                }
+                if (trim((string) ($item['product_name'] ?? '')) === '') {
+                    $missingFields[] = "items[{$idx}].product_name";
+                }
+                $qty = $item['quantity'] ?? null;
+                if (!is_int($qty) && !(is_string($qty) && ctype_digit($qty)) || (int) $qty <= 0) {
+                    $missingFields[] = "items[{$idx}].quantity (entero > 0)";
+                }
+                $price = $this->numberOrNull($item['unit_price'] ?? null);
+                if ($price === null || $price <= 0) {
+                    $missingFields[] = "items[{$idx}].unit_price (número > 0)";
                 }
             }
         }
@@ -66,11 +133,12 @@ class IntegrationService
 
             $validationMsg = 'Validación rechazada. Campos obligatorios ausentes o inválidos: ' . implode(', ', $missingFields);
             $response = [
-                'ok'           => false,
-                'execution_id' => $executionId,
-                'scenario'     => 'ESCENARIO_1_PEDIDO',
-                'error_code'   => $errorType,
-                'message'      => $validationMsg,
+                'ok'             => false,
+                'execution_id'   => $executionId,
+                'scenario'       => 'ESCENARIO_1_PEDIDO',
+                'error_code'     => $errorType,
+                'invalid_fields' => $missingFields,
+                'message'        => $validationMsg,
             ];
 
             $this->logExecution(
@@ -90,31 +158,72 @@ class IntegrationService
             return $response;
         }
 
-        // 2. Transformación / Normalización de estados y datos (Apartado 3.c)
-        $rawStatus = strtolower(trim((string) ($payload['status'] ?? 'pagado_simulado')));
-        $statusMap = [
-            'created'               => 'creado',
-            'creado'                => 'creado',
-            'paid'                  => 'pendiente_preparacion',
-            'pagado_simulado'       => 'pendiente_preparacion',
-            'pendiente_preparacion' => 'pendiente_preparacion',
-            'shipped'               => 'enviado',
-            'enviado'               => 'enviado',
-            'cancelled'             => 'cancelado',
-            'cancelado'             => 'cancelado',
-            'incidencia'            => 'incidencia',
-        ];
-        $normalizedOrderStatus = $statusMap[$rawStatus] ?? 'pendiente_preparacion';
-        $paymentStatus = ($rawStatus === 'creado') ? 'pendiente_pago' : 'pagado_simulado';
-        $now = (string) ($payload['occurred_at'] ?? date('Y-m-d H:i:s'));
-        if (str_contains($now, 'T')) {
-            $now = date('Y-m-d H:i:s', strtotime($now));
+        // 1b. El total tiene que cuadrar: suma de líneas − descuento + envío (±0,01), como calcula la tienda
+        $discountAmount = $discountAmount ?? 0.0;
+        $linesTotal = 0.0;
+        foreach ($items as $item) {
+            $linesTotal += round((int) $item['quantity'] * (float) $this->numberOrNull($item['unit_price']), 2);
         }
+        $linesTotal = round($linesTotal, 2);
+        $expectedTotal = round($linesTotal - $discountAmount + $shippingAmount, 2);
+        if (abs($expectedTotal - $totalAmount) > 0.01) {
+            $msg = sprintf(
+                'Importe inválido: total_amount %.2f no cuadra con líneas %.2f − descuento %.2f + envío %.2f = %.2f.',
+                $totalAmount, $linesTotal, $discountAmount, $shippingAmount, $expectedTotal
+            );
+            $response = [
+                'ok'             => false,
+                'execution_id'   => $executionId,
+                'scenario'       => 'ESCENARIO_1_PEDIDO',
+                'error_code'     => 'ERR_IMPORTE_INVALIDO',
+                'expected_total' => $expectedTotal,
+                'message'        => $msg,
+            ];
+            $this->logExecution($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, 'ERROR', 'ERR_IMPORTE_INVALIDO', $msg, $payload, $response, $startTime);
+            return $response;
+        }
+
+        // 2. Transformación / Normalización de estados y datos (Apartado 3.c)
+        $normalizedOrderStatus = $statusMap[$rawStatus];
+        $paymentStatus = $this->paymentStatusFor($normalizedOrderStatus);
+        $now = date('Y-m-d H:i:s', (int) $occurredTs);
+        $customerPhone = $this->stringOrNull($customer['phone'] ?? null);
+        $shippingAddress = $this->stringOrNull($payload['shipping_address'] ?? ($customer['address'] ?? null));
 
         try {
             $this->db->beginTransaction();
 
-            // 3. Upsert Cliente en Back-Office
+            // 3a. Idempotencia por event_id: un evento ya procesado se responde como «duplicate» sin tocar nada
+            if ($this->isEventProcessed($eventId)) {
+                $this->db->rollBack();
+                return $this->duplicateResponse($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, $eventId, $payload, $startTime);
+            }
+
+            // 3b. Idempotencia por order_ref (Apartado 13 - Rúbrica: idempotencia básica)
+            $stmtOrd = $this->db->prepare('SELECT * FROM erp_orders WHERE order_ref = :ref LIMIT 1');
+            $stmtOrd->execute([':ref' => $orderRef]);
+            $existingOrder = $stmtOrd->fetch();
+
+            // 4. Pedido nuevo: TODOS los SKU tienen que existir en el almacén y con stock suficiente,
+            //    antes de escribir nada. Si falla una línea, no se guarda nada (rollback).
+            if (!$existingOrder) {
+                $stockError = $this->checkSkusAndStock($items);
+                if ($stockError !== null) {
+                    $this->db->rollBack();
+                    $response = [
+                        'ok'           => false,
+                        'execution_id' => $executionId,
+                        'scenario'     => 'ESCENARIO_1_PEDIDO',
+                        'error_code'   => $stockError['error_code'],
+                        'details'      => $stockError['details'],
+                        'message'      => $stockError['message'],
+                    ];
+                    $this->logExecution($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, 'ERROR', $stockError['error_code'], $stockError['message'], $payload, $response, $startTime);
+                    return $response;
+                }
+            }
+
+            // 5. Upsert Cliente en Back-Office
             $stmtCust = $this->db->prepare('SELECT * FROM erp_customers WHERE email = :email LIMIT 1');
             $stmtCust->execute([':email' => strtolower($customerEmail)]);
             $existingCustomer = $stmtCust->fetch();
@@ -131,8 +240,8 @@ class IntegrationService
                 ');
                 $updCust->execute([
                     ':name'       => $customerName,
-                    ':phone'      => $payload['customer']['phone'] ?? null,
-                    ':address'    => $payload['shipping_address'] ?? ($payload['customer']['address'] ?? null),
+                    ':phone'      => $customerPhone,
+                    ':address'    => $shippingAddress,
                     ':updated_at' => $now,
                     ':id'         => $customerId,
                 ]);
@@ -142,11 +251,11 @@ class IntegrationService
                     VALUES (:ext_id, :name, :email, :phone, :address, :segment, 0, 0.00, :created_at, :updated_at)
                 ');
                 $insCust->execute([
-                    ':ext_id'     => (string) ($payload['customer']['id'] ?? 'CUST-' . random_int(100, 999)),
+                    ':ext_id'     => $this->stringOrNull($customer['id'] ?? null),
                     ':name'       => $customerName,
                     ':email'      => strtolower($customerEmail),
-                    ':phone'      => $payload['customer']['phone'] ?? '+34 600 000 000',
-                    ':address'    => $payload['shipping_address'] ?? ($payload['customer']['address'] ?? 'Calle Académica 12, Murcia'),
+                    ':phone'      => $customerPhone,
+                    ':address'    => $shippingAddress,
                     ':segment'    => $totalAmount >= 45 ? 'VIP_PICANTE' : 'ESTANDAR',
                     ':created_at' => $now,
                     ':updated_at' => $now,
@@ -154,45 +263,47 @@ class IntegrationService
                 $customerId = (int) $this->db->lastInsertId();
             }
 
-            // 4. Control de Idempotencia por order_ref (Apartado 13 - Rúbrica: idempotencia básica)
-            $stmtOrd = $this->db->prepare('SELECT * FROM erp_orders WHERE order_ref = :ref LIMIT 1');
-            $stmtOrd->execute([':ref' => $orderRef]);
-            $existingOrder = $stmtOrd->fetch();
-
             $isIdempotentUpdate = false;
+            $orderResult = 'created';
             if ($existingOrder) {
+                // Pedido ya integrado: un evento solo puede HACER AVANZAR el estado (tabla de transiciones),
+                // nunca retrocederlo (p. ej. un order.created que llega tarde a un pedido ya enviado),
+                // y el total no se sobrescribe.
                 $isIdempotentUpdate = true;
                 $orderId = (int) $existingOrder['id'];
-                $updOrder = $this->db->prepare('
-                    UPDATE erp_orders
-                    SET payment_status = :payment_status,
-                        order_status = :order_status,
-                        total_amount = :total_amount,
-                        updated_at = :updated_at
-                    WHERE id = :id
-                ');
-                $updOrder->execute([
-                    ':payment_status' => $paymentStatus,
-                    ':order_status'   => $normalizedOrderStatus,
-                    ':total_amount'   => $totalAmount,
-                    ':updated_at'     => date('Y-m-d H:i:s'),
-                    ':id'             => $orderId,
-                ]);
+                $prevStatus = (string) $existingOrder['order_status'];
+                if ($normalizedOrderStatus === $prevStatus) {
+                    $orderResult = 'unchanged';
+                } elseif ($this->isAllowedEventTransition($prevStatus, $normalizedOrderStatus)) {
+                    $orderResult = 'updated';
+                    $this->db->prepare('
+                        UPDATE erp_orders
+                        SET payment_status = :payment_status, order_status = :order_status, updated_at = :updated_at
+                        WHERE id = :id
+                    ')->execute([
+                        ':payment_status' => $paymentStatus,
+                        ':order_status'   => $normalizedOrderStatus,
+                        ':updated_at'     => date('Y-m-d H:i:s'),
+                        ':id'             => $orderId,
+                    ]);
+                } else {
+                    $orderResult = 'ignored';
+                }
             } else {
-                // Calcular desglose de IVA (21% incluido como en Piquantum Tarea 1)
-                $subtotal = round($totalAmount / 1.21, 2);
-                $tax = round($totalAmount - $subtotal, 2);
-                $shipping = isset($payload['shipping_amount']) ? (float) $payload['shipping_amount'] : ($totalAmount >= 60 ? 0.00 : 4.95);
+                // Desglose como en la tienda (Tarea 1): subtotal = suma de líneas; IVA del 21 % incluido en el total
+                $subtotal = $linesTotal;
+                $tax = round($totalAmount - $totalAmount / 1.21, 2);
+                $shipping = $shippingAmount;
 
                 $insOrd = $this->db->prepare('
                     INSERT INTO erp_orders (
                         order_ref, customer_id, customer_name, customer_email, shipping_address,
-                        subtotal_amount, tax_amount, shipping_amount, discount_code, total_amount,
+                        subtotal_amount, tax_amount, shipping_amount, discount_code, discount_amount, total_amount,
                         payment_method, payment_status, order_status, priority, sync_status,
                         channel_created_at, integrated_at, updated_at
                     ) VALUES (
                         :order_ref, :customer_id, :customer_name, :customer_email, :shipping_address,
-                        :subtotal, :tax, :shipping, :discount_code, :total,
+                        :subtotal, :tax, :shipping, :discount_code, :discount_amount, :total,
                         :payment_method, :payment_status, :order_status, :priority, :sync_status,
                         :channel_created_at, :integrated_at, :updated_at
                     )
@@ -202,13 +313,14 @@ class IntegrationService
                     ':customer_id'        => $customerId,
                     ':customer_name'      => $customerName,
                     ':customer_email'     => strtolower($customerEmail),
-                    ':shipping_address'   => $payload['shipping_address'] ?? ($payload['customer']['address'] ?? 'Calle Mayor 14, 30001 Murcia'),
+                    ':shipping_address'   => $shippingAddress,
                     ':subtotal'           => $subtotal,
                     ':tax'                => $tax,
                     ':shipping'           => $shipping,
-                    ':discount_code'      => $payload['discount_code'] ?? null,
+                    ':discount_code'      => $discountCode,
+                    ':discount_amount'    => $discountAmount,
                     ':total'              => $totalAmount,
-                    ':payment_method'     => $payload['payment_method'] ?? 'redsys_sandbox',
+                    ':payment_method'     => $this->stringOrNull($payload['payment_method'] ?? null),
                     ':payment_status'     => $paymentStatus,
                     ':order_status'       => $normalizedOrderStatus,
                     ':priority'           => $totalAmount >= 50 ? 'ALTA' : 'NORMAL',
@@ -226,22 +338,22 @@ class IntegrationService
                 ');
                 $updStock = $this->db->prepare('
                     UPDATE erp_inventory
-                    SET stock_available = CASE WHEN stock_available >= :qty THEN stock_available - :qty ELSE 0 END,
+                    SET stock_available = stock_available - :qty,
                         updated_at = :updated_at
-                    WHERE sku = :sku
+                    WHERE sku = :sku AND stock_available >= :qty
                 ');
 
                 foreach ($items as $item) {
                     $qty = (int) $item['quantity'];
-                    $unitPrice = (float) ($item['unit_price'] ?? 8.50);
+                    $unitPrice = (float) $item['unit_price'];
                     $lineTotal = round($qty * $unitPrice, 2);
                     $sku = strtoupper(trim((string) $item['sku']));
 
                     $insItem->execute([
                         ':order_id'     => $orderId,
                         ':sku'          => $sku,
-                        ':product_name' => (string) ($item['product_name'] ?? $sku),
-                        ':variant_size' => (string) ($item['variant_size'] ?? '100ml'),
+                        ':product_name' => trim((string) $item['product_name']),
+                        ':variant_size' => $this->stringOrNull($item['variant_size'] ?? null),
                         ':quantity'     => $qty,
                         ':unit_price'   => $unitPrice,
                         ':line_total'   => $lineTotal,
@@ -252,6 +364,10 @@ class IntegrationService
                         ':updated_at' => date('Y-m-d H:i:s'),
                         ':sku'        => $sku,
                     ]);
+                    // Red de seguridad: si el stock ha cambiado entre la comprobación y el descuento, se deshace todo
+                    if ($updStock->rowCount() !== 1) {
+                        throw new \DomainException("Stock insuficiente para {$sku} al descontar {$qty} uds.");
+                    }
                 }
 
                 // Actualizar métricas acumuladas del cliente
@@ -262,28 +378,31 @@ class IntegrationService
                         segment = CASE WHEN (total_spent + :amount) >= 50 THEN "VIP_PICANTE" ELSE segment END
                     WHERE id = :id
                 ')->execute([':amount' => $totalAmount, ':id' => $customerId]);
-
-                // Actualizar contadores de embudo (Funnel)
-                $this->incrementFunnelCounter('order.created', 1);
-                if ($paymentStatus === 'pagado_simulado') {
-                    $this->incrementFunnelCounter('payment.simulated', 1);
-                }
             }
 
+            $this->markEventProcessed($eventId, $eventType, $orderRef);
             $this->db->commit();
 
-            $msg = $isIdempotentUpdate
-                ? "Pedido {$orderRef} ya existía en Back-Office: actualizado de forma idempotente a estado '{$normalizedOrderStatus}'."
-                : "Pedido {$orderRef} creado e integrado en Back-Office con " . count($items) . " líneas y stock descontado.";
+            $currentStatus = $orderResult === 'ignored' || $orderResult === 'unchanged'
+                ? (string) $existingOrder['order_status']
+                : $normalizedOrderStatus;
+            $msg = match ($orderResult) {
+                'created'   => "Pedido {$orderRef} creado e integrado en Back-Office con " . count($items) . " líneas y stock descontado.",
+                'updated'   => "Pedido {$orderRef} ya existía: estado avanzado de '{$existingOrder['order_status']}' a '{$normalizedOrderStatus}' (el total no se modifica).",
+                'unchanged' => "Pedido {$orderRef} ya existía en estado '{$currentStatus}': sin cambios.",
+                default     => "Pedido {$orderRef} ya existía en estado '{$currentStatus}': el evento ('{$normalizedOrderStatus}') no puede hacer retroceder ni saltarse estados; se ignora.",
+            };
 
             $response = [
                 'ok'                => true,
                 'execution_id'      => $executionId,
                 'scenario'          => 'ESCENARIO_1_PEDIDO',
+                'result'            => $orderResult,
                 'idempotent_update' => $isIdempotentUpdate,
+                'event_id'          => $eventId,
                 'order_id'          => $orderId,
                 'order_ref'         => $orderRef,
-                'normalized_status' => $normalizedOrderStatus,
+                'normalized_status' => $currentStatus,
                 'message'           => $msg,
             ];
 
@@ -301,6 +420,19 @@ class IntegrationService
                 $startTime
             );
 
+            return $response;
+        } catch (\DomainException $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            $response = [
+                'ok'           => false,
+                'execution_id' => $executionId,
+                'scenario'     => 'ESCENARIO_1_PEDIDO',
+                'error_code'   => 'ERR_STOCK_INSUFICIENTE',
+                'message'      => $e->getMessage(),
+            ];
+            $this->logExecution($executionId, 'ESCENARIO_1_PEDIDO', $eventType, $direction, $orderRef, 'ERROR', 'ERR_STOCK_INSUFICIENTE', $e->getMessage(), $payload, $response, $startTime);
             return $response;
         } catch (Throwable $e) {
             if ($this->db->inTransaction()) {
@@ -344,7 +476,7 @@ class IntegrationService
             $newStatus = trim((string) ($payload['new_status'] ?? ''));
             $newPriority = trim((string) ($payload['priority'] ?? ''));
 
-            $allowedStatuses = ['creado', 'pagado_simulado', 'pendiente_preparacion', 'enviado', 'cancelado', 'incidencia'];
+            $allowedStatuses = self::ORDER_STATUSES;
 
             if ($orderRef === '' || !in_array($newStatus, $allowedStatuses, true)) {
                 $msg = "Cambio operativo rechazado: order_ref vacío o estado '{$newStatus}' fuera del contrato (" . implode(', ', $allowedStatuses) . ").";
@@ -367,38 +499,69 @@ class IntegrationService
             $prevStatus = $order['order_status'];
             $priorityToSave = $newPriority !== '' ? $newPriority : $order['priority'];
 
-            // Notificar a n8n si el cambio nace en el Back-Office
-            $webhookResult = null;
-            $syncState = 'SINCRONIZADO';
-            if ($notifyExternalN8n) {
-                $webhookResult = WebhookNotifier::dispatch('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'order.status_changed', [
+            // Mismo estado: 200 sin cambios de estado ni aviso a n8n (como mucho se actualiza la prioridad)
+            if ($newStatus === $prevStatus) {
+                if ($priorityToSave !== $order['priority']) {
+                    $this->db->prepare('UPDATE erp_orders SET priority = :p, updated_at = :u WHERE order_ref = :ref')
+                        ->execute([':p' => $priorityToSave, ':u' => date('Y-m-d H:i:s'), ':ref' => $orderRef]);
+                }
+                $msg = "Pedido {$orderRef} ya está en estado '{$newStatus}': sin cambios de estado (prioridad: {$priorityToSave}).";
+                $res = [
+                    'ok'              => true,
+                    'execution_id'    => $executionId,
+                    'scenario'        => 'ESCENARIO_2_SINCRONIZACION',
                     'order_ref'       => $orderRef,
                     'previous_status' => $prevStatus,
                     'new_status'      => $newStatus,
-                    'priority'        => $priorityToSave,
-                    'customer_email'  => $order['customer_email'],
-                    'origin'          => 'backoffice_erp',
-                ]);
-                if (!$webhookResult['dispatched']) {
-                    $syncState = 'PENDIENTE_SINCRONIZACION';
-                }
+                    'unchanged'       => true,
+                    'message'         => $msg,
+                ];
+                $this->logExecution($executionId, 'ESCENARIO_2_SINCRONIZACION', 'order.status_changed', $direction, $orderRef, 'SUCCESS', null, $msg, $payload, $res, $startTime);
+                return $res;
             }
 
-            $upd = $this->db->prepare('
+            // Transición no permitida (p. ej. cancelado -> enviado): se rechaza sin tocar el pedido
+            if (!$this->isAllowedTransition($prevStatus, $newStatus)) {
+                $allowedNext = self::ORDER_TRANSITIONS[$prevStatus] ?? [];
+                $msg = "Transición no permitida para {$orderRef}: '{$prevStatus}' -> '{$newStatus}'. Desde '{$prevStatus}' solo se puede pasar a: "
+                    . ($allowedNext ? implode(', ', $allowedNext) : 'ninguno (estado final)') . '.';
+                $res = ['ok' => false, 'error_code' => 'ERR_TRANSICION_ESTADO', 'allowed_next' => $allowedNext, 'message' => $msg];
+                $this->logExecution($executionId, 'ESCENARIO_2_SINCRONIZACION', 'order.status_changed', $direction, $orderRef, 'ERROR', 'ERR_TRANSICION_ESTADO', $msg, $payload, $res, $startTime);
+                return $res;
+            }
+
+            // 1) PRIMERO se guarda el cambio y, en la misma transacción, el aviso para n8n en la bandeja de salida
+            $this->db->beginTransaction();
+            $this->db->prepare('
                 UPDATE erp_orders
                 SET order_status = :status,
                     priority = :priority,
                     sync_status = :sync_status,
                     updated_at = :updated_at
                 WHERE order_ref = :ref
-            ');
-            $upd->execute([
+            ')->execute([
                 ':status'      => $newStatus,
                 ':priority'    => $priorityToSave,
-                ':sync_status' => $syncState,
+                ':sync_status' => $notifyExternalN8n ? 'PENDIENTE_SINCRONIZACION' : 'SINCRONIZADO',
                 ':updated_at'  => date('Y-m-d H:i:s'),
                 ':ref'         => $orderRef,
             ]);
+            $outboxId = null;
+            if ($notifyExternalN8n) {
+                $outboxId = $this->enqueueWebhook('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'order.status_changed', [
+                    'order_ref'       => $orderRef,
+                    'previous_status' => $prevStatus,
+                    'new_status'      => $newStatus,
+                    'priority'        => $priorityToSave,
+                    'customer_email'  => $order['customer_email'],
+                    'origin'          => 'backoffice_erp',
+                ], 'order', $orderRef);
+            }
+            $this->db->commit();
+
+            // 2) DESPUÉS se intenta enviar; si n8n no responde 2xx, queda PENDIENTE_SINCRONIZACION para el reintento
+            $webhookResult = $outboxId !== null ? $this->deliverWebhook($outboxId) : null;
+            $syncState = ($webhookResult === null || $webhookResult['dispatched']) ? 'SINCRONIZADO' : 'PENDIENTE_SINCRONIZACION';
 
             $msg = "Estado de pedido {$orderRef} actualizado ({$prevStatus} -> {$newStatus}, Prioridad: {$priorityToSave}). Estado sync: {$syncState}.";
             $res = [
@@ -440,32 +603,35 @@ class IntegrationService
         }
 
         $prevStock = (int) $inv['stock_available'];
-        $webhookResult = null;
-        $syncState = 'SINCRONIZADO';
-        if ($notifyExternalN8n) {
-            $webhookResult = WebhookNotifier::dispatch('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'inventory.stock_updated', [
-                'sku'            => $sku,
-                'product_name'   => $inv['product_name'],
-                'variant_size'   => $inv['variant_size'],
-                'previous_stock' => $prevStock,
-                'new_stock'      => $newStock,
-                'origin'         => 'backoffice_erp',
-            ]);
-            if (!$webhookResult['dispatched']) {
-                $syncState = 'PENDIENTE_SINCRONIZACION';
-            }
-        }
 
+        // 1) PRIMERO se guarda el cambio y el aviso para n8n (misma transacción)
+        $this->db->beginTransaction();
         $this->db->prepare('
             UPDATE erp_inventory
             SET stock_available = :stock, sync_status = :sync, updated_at = :updated
             WHERE sku = :sku
         ')->execute([
             ':stock'   => $newStock,
-            ':sync'    => $syncState,
+            ':sync'    => $notifyExternalN8n ? 'PENDIENTE_SINCRONIZACION' : 'SINCRONIZADO',
             ':updated' => date('Y-m-d H:i:s'),
             ':sku'     => $sku,
         ]);
+        $outboxId = null;
+        if ($notifyExternalN8n) {
+            $outboxId = $this->enqueueWebhook('N8N_WEBHOOK_OPERATIONAL_CHANGE_URL', 'inventory.stock_updated', [
+                'sku'            => $sku,
+                'product_name'   => $inv['product_name'],
+                'variant_size'   => $inv['variant_size'],
+                'previous_stock' => $prevStock,
+                'new_stock'      => $newStock,
+                'origin'         => 'backoffice_erp',
+            ], 'inventory', $sku);
+        }
+        $this->db->commit();
+
+        // 2) DESPUÉS se intenta enviar
+        $webhookResult = $outboxId !== null ? $this->deliverWebhook($outboxId) : null;
+        $syncState = ($webhookResult === null || $webhookResult['dispatched']) ? 'SINCRONIZADO' : 'PENDIENTE_SINCRONIZACION';
 
         $msg = "Stock de {$sku} ({$inv['product_name']} {$inv['variant_size']}) actualizado ({$prevStock} -> {$newStock} uds). Estado sync: {$syncState}.";
         $res = [
@@ -476,9 +642,130 @@ class IntegrationService
             'previous_stock' => $prevStock,
             'new_stock'      => $newStock,
             'sync_status'    => $syncState,
+            'webhook_dispatch' => $webhookResult,
             'message'        => $msg,
         ];
         $this->logExecution($executionId, 'ESCENARIO_2_SINCRONIZACION', 'inventory.stock_updated', $direction, $sku, 'SUCCESS', null, $msg, $payload, $res, $startTime);
+        return $res;
+    }
+
+    // =========================================================================
+    // CARGA INICIAL DEL CATÁLOGO DESDE LA TIENDA (POST /api/v1/inventory/import)
+    // =========================================================================
+    /**
+     * Alta o actualización de productos por sku (idempotente: importar dos veces la misma lista deja lo mismo).
+     * Todo o nada: si un producto no es válido, no se guarda ninguno.
+     * heat_level, min_stock_threshold y warehouse_location no vienen de la tienda: en las altas se dejan
+     * los valores por defecto del almacén y en las actualizaciones no se tocan.
+     */
+    public function importInventory(array $payload): array
+    {
+        $startTime = microtime(true);
+        $executionId = (string) ($payload['execution_id'] ?? ('exec_import_' . bin2hex(random_bytes(4))));
+        $direction = 'eCommerce -> n8n -> BackOffice';
+        $products = $payload['products'] ?? null;
+
+        $invalid = [];
+        $clean = [];
+        if (!is_array($products) || count($products) === 0 || !array_is_list($products)) {
+            $invalid[] = 'products[] (lista con al menos 1 producto)';
+        } else {
+            foreach ($products as $i => $p) {
+                $p = is_array($p) ? $p : [];
+                $sku = strtoupper(trim((string) ($p['sku'] ?? '')));
+                $name = trim((string) ($p['product_name'] ?? ''));
+                $category = trim((string) ($p['category'] ?? ''));
+                $price = $this->numberOrNull($p['unit_price'] ?? null);
+                $stock = $p['stock_available'] ?? null;
+                if ($sku === '' || preg_match('/\s/', $sku)) {
+                    $invalid[] = "products[{$i}].sku (sin espacios)";
+                }
+                if ($name === '') {
+                    $invalid[] = "products[{$i}].product_name";
+                }
+                if ($category === '') {
+                    $invalid[] = "products[{$i}].category";
+                }
+                if ($price === null || $price <= 0) {
+                    $invalid[] = "products[{$i}].unit_price (número > 0)";
+                }
+                if (!is_int($stock) || $stock < 0) {
+                    $invalid[] = "products[{$i}].stock_available (entero >= 0)";
+                }
+                if (isset($clean[$sku])) {
+                    $invalid[] = "products[{$i}].sku repetido ({$sku})";
+                }
+                $clean[$sku] = [
+                    'sku' => $sku, 'product_name' => $name, 'category' => $category,
+                    'variant_size' => $this->stringOrNull($p['variant_size'] ?? null),
+                    'unit_price' => $price, 'stock_available' => $stock,
+                ];
+            }
+        }
+
+        if (!empty($invalid)) {
+            $msg = 'Importación de catálogo rechazada (no se ha guardado nada). Campos ausentes o inválidos: ' . implode(', ', $invalid);
+            $res = ['ok' => false, 'error_code' => 'ERR_CAMPOS_OBLIGATORIOS', 'invalid_fields' => $invalid, 'message' => $msg];
+            $this->logExecution($executionId, 'CARGA_CATALOGO', 'inventory.imported', $direction, 'CATALOGO', 'ERROR', 'ERR_CAMPOS_OBLIGATORIOS', $msg, $payload, $res, $startTime);
+            return $res;
+        }
+
+        $created = $updated = $unchanged = 0;
+        $now = date('Y-m-d H:i:s');
+        $select = $this->db->prepare('SELECT product_name, category, variant_size, unit_price, stock_available FROM erp_inventory WHERE sku = :sku LIMIT 1');
+        $insert = $this->db->prepare('
+            INSERT INTO erp_inventory (sku, product_name, category, variant_size, unit_price, stock_available, sync_status, updated_at)
+            VALUES (:sku, :name, :category, :size, :price, :stock, "SINCRONIZADO", :updated)
+        ');
+        $update = $this->db->prepare('
+            UPDATE erp_inventory
+            SET product_name = :name, category = :category, variant_size = :size, unit_price = :price,
+                stock_available = :stock, sync_status = "SINCRONIZADO", updated_at = :updated
+            WHERE sku = :sku
+        ');
+
+        $this->db->beginTransaction();
+        try {
+            foreach ($clean as $p) {
+                $params = [
+                    ':sku' => $p['sku'], ':name' => $p['product_name'], ':category' => $p['category'],
+                    ':size' => $p['variant_size'], ':price' => $p['unit_price'], ':stock' => $p['stock_available'], ':updated' => $now,
+                ];
+                $select->execute([':sku' => $p['sku']]);
+                $current = $select->fetch();
+                if ($current === false) {
+                    $insert->execute($params);
+                    $created++;
+                } elseif ($current['product_name'] === $p['product_name'] && $current['category'] === $p['category']
+                    && $current['variant_size'] === $p['variant_size'] && abs((float) $current['unit_price'] - $p['unit_price']) < 0.001
+                    && (int) $current['stock_available'] === $p['stock_available']) {
+                    $unchanged++;
+                } else {
+                    $update->execute($params);
+                    $updated++;
+                }
+            }
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->db->rollBack();
+            $msg = 'Error interno al importar el catálogo: ' . $e->getMessage();
+            $res = ['ok' => false, 'error_code' => 'ERR_DB_TRANSACTION', 'message' => $msg];
+            $this->logExecution($executionId, 'CARGA_CATALOGO', 'inventory.imported', $direction, 'CATALOGO', 'ERROR', 'ERR_DB_TRANSACTION', $msg, $payload, $res, $startTime);
+            return $res;
+        }
+
+        $msg = sprintf('Catálogo importado: %d productos (%d altas, %d actualizados, %d sin cambios).', count($clean), $created, $updated, $unchanged);
+        $res = [
+            'ok'           => true,
+            'execution_id' => $executionId,
+            'scenario'     => 'CARGA_CATALOGO',
+            'received'     => count($clean),
+            'created'      => $created,
+            'updated'      => $updated,
+            'unchanged'    => $unchanged,
+            'message'      => $msg,
+        ];
+        $this->logExecution($executionId, 'CARGA_CATALOGO', 'inventory.imported', $direction, 'CATALOGO', 'SUCCESS', null, $msg, $payload, $res, $startTime);
         return $res;
     }
 
@@ -491,15 +778,24 @@ class IntegrationService
         $executionId = $payload['execution_id'] ?? ('exec_inc_' . bin2hex(random_bytes(4)));
         $eventType = (string) ($payload['event_type'] ?? 'support.requested');
 
-        $ticketRef = trim((string) ($payload['ticket_ref'] ?? ('INC-' . date('Ymd') . '-' . random_int(1000, 9999))));
-        $orderRef = !empty($payload['order_ref']) ? trim((string) $payload['order_ref']) : null;
+        // Sin valores inventados: ticket_ref y customer_name son obligatorios (ni aleatorios ni genéricos)
+        $ticketRef = trim((string) ($payload['ticket_ref'] ?? ''));
+        $orderRef = $this->stringOrNull($payload['order_ref'] ?? null);
         $customerEmail = trim((string) ($payload['customer_email'] ?? ($payload['customer']['email'] ?? '')));
-        $customerName = trim((string) ($payload['customer_name'] ?? ($payload['customer']['name'] ?? 'Cliente Piquantum')));
+        $customerName = trim((string) ($payload['customer_name'] ?? ($payload['customer']['name'] ?? '')));
         $subject = trim((string) ($payload['subject'] ?? ''));
         $description = trim((string) ($payload['description'] ?? ''));
-        $telegramChatId = trim((string) ($payload['telegram_chat_id'] ?? '@laura_cliente_test'));
+        // chat_id de Telegram: opcional y sin valor por defecto. Un bot no puede escribir a un @usuario:
+        // necesita el chat_id numérico (negativo en grupos) de alguien que haya escrito antes al bot.
+        $telegramChatId = $this->stringOrNull($payload['telegram_chat_id'] ?? null);
 
         $missing = [];
+        if ($ticketRef === '') {
+            $missing[] = 'ticket_ref';
+        }
+        if ($customerName === '') {
+            $missing[] = 'customer_name';
+        }
         if ($customerEmail === '' || !filter_var($customerEmail, FILTER_VALIDATE_EMAIL)) {
             $missing[] = 'customer_email';
         }
@@ -509,15 +805,24 @@ class IntegrationService
         if ($description === '') {
             $missing[] = 'description';
         }
+        if ($telegramChatId !== null && !preg_match('/^-?\d+$/', $telegramChatId)) {
+            $missing[] = 'telegram_chat_id (numérico; no se admite @usuario)';
+        }
 
         if (!empty($missing)) {
             $msg = 'Incidencia rechazada por datos incompletos: ' . implode(', ', $missing);
-            $res = ['ok' => false, 'error_code' => 'ERR_CAMPOS_OBLIGATORIOS', 'message' => $msg];
-            $this->logExecution($executionId, 'ESCENARIO_3_POSTVENTA', $eventType, $direction, $ticketRef, 'ERROR', 'ERR_CAMPOS_OBLIGATORIOS', $msg, $payload, $res, $startTime);
+            $res = ['ok' => false, 'error_code' => 'ERR_CAMPOS_OBLIGATORIOS', 'invalid_fields' => $missing, 'message' => $msg];
+            $this->logExecution($executionId, 'ESCENARIO_3_POSTVENTA', $eventType, $direction, $ticketRef ?: 'SIN_REFERENCIA', 'ERROR', 'ERR_CAMPOS_OBLIGATORIOS', $msg, $payload, $res, $startTime);
             return $res;
         }
 
         $now = date('Y-m-d H:i:s');
+
+        // Idempotencia por event_id (opcional en incidencias): si se repite, «duplicate» sin tocar nada
+        $eventId = $this->stringOrNull($payload['event_id'] ?? null);
+        if ($eventId !== null && $this->isEventProcessed($eventId)) {
+            return $this->duplicateResponse($executionId, 'ESCENARIO_3_POSTVENTA', $eventType, $direction, $ticketRef, $eventId, $payload, $startTime);
+        }
 
         // Si existe el pedido, marcarlo con alerta o vincularlo
         $stmtCheck = $this->db->prepare('SELECT id FROM erp_tickets WHERE ticket_ref = :ref LIMIT 1');
@@ -559,7 +864,10 @@ class IntegrationService
                 ':status'      => 'EN_REVISION_IA',
                 ':created_at'  => $now,
             ]);
-            $this->incrementFunnelCounter('support.requested', 1);
+        }
+
+        if ($eventId !== null) {
+            $this->markEventProcessed($eventId, $eventType, $ticketRef);
         }
 
         $msg = "Incidencia {$ticketRef} registrada en Back-Office y vinculada al pedido " . ($orderRef ?? 'SIN_PEDIDO') . " en estado EN_REVISION_IA.";
@@ -697,10 +1005,21 @@ class IntegrationService
         if ($ticketRef === '') {
             $missing[] = 'ticket_ref';
         }
+        // Tampoco se inventan el mensaje que se enviará al cliente ni las herramientas que dice haber usado el agente
+        if (trim((string) ($payload['mensaje_propuesto_telegram'] ?? '')) === '') {
+            $missing[] = 'mensaje_propuesto_telegram';
+        }
+        $toolsRaw = $payload['herramientas_utilizadas'] ?? null;
+        $toolsList = is_array($toolsRaw)
+            ? array_values(array_filter(array_map(fn ($t) => trim((string) $t), $toolsRaw), fn ($t) => $t !== ''))
+            : array_values(array_filter(array_map('trim', explode(',', (string) $toolsRaw)), fn ($t) => $t !== ''));
+        if (count($toolsList) === 0) {
+            $missing[] = 'herramientas_utilizadas';
+        }
 
         if (!empty($missing)) {
             $msg = 'Propuesta del Agente IA rechazada por incumplir el contrato de salida estructurada. Faltan: ' . implode(', ', $missing);
-            $res = ['ok' => false, 'error_code' => 'ERR_SALIDA_AGENTE_INCOMPLETA', 'message' => $msg];
+            $res = ['ok' => false, 'error_code' => 'ERR_SALIDA_AGENTE_INCOMPLETA', 'invalid_fields' => $missing, 'message' => $msg];
             $this->logExecution($executionId, 'ESCENARIO_3_AGENTE_IA', 'ai.proposal.rejected', 'n8n AI Agent -> BackOffice', $ticketRef ?: 'N/A', 'ERROR', 'ERR_SALIDA_AGENTE_INCOMPLETA', $msg, $payload, $res, $startTime);
             return $res;
         }
@@ -715,9 +1034,7 @@ class IntegrationService
             ? json_encode($payload['datos_consultados'], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)
             : (string) $payload['datos_consultados'];
 
-        $toolsUsed = is_array($payload['herramientas_utilizadas'] ?? null)
-            ? implode(', ', $payload['herramientas_utilizadas'])
-            : (string) ($payload['herramientas_utilizadas'] ?? 'consultar_pedido_e_historial_cliente, consultar_disponibilidad_almacen, proponer_resolucion_ticket');
+        $toolsUsed = implode(', ', $toolsList);
 
         $ins = $this->db->prepare('
             INSERT INTO erp_ai_audits (
@@ -735,13 +1052,13 @@ class IntegrationService
 
         $ins->execute([
             ':ticket_ref'                => $ticketRef,
-            ':order_ref'                 => $payload['order_ref'] ?? null,
-            ':agent_model'               => $payload['agent_model'] ?? 'gemini-2.5-flash (n8n Tools Agent)',
+            ':order_ref'                 => $this->stringOrNull($payload['order_ref'] ?? null),
+            ':agent_model'               => $this->stringOrNull($payload['agent_model'] ?? null),
             ':tools_invoked'             => $toolsUsed,
             ':detected_case_type'        => (string) $payload['tipo_caso_detectado'],
             ':consulted_data_json'       => (string) $consultedJson,
             ':proposed_action'           => (string) $payload['accion_propuesta'],
-            ':proposed_customer_message' => (string) ($payload['mensaje_propuesto_telegram'] ?? 'Hola, hemos revisado tu incidencia y gestionado la solución propuesta por nuestro equipo de soporte.'),
+            ':proposed_customer_message' => trim((string) $payload['mensaje_propuesto_telegram']),
             ':justification'             => (string) $payload['justificacion_breve'],
             ':confidence_and_priority'   => (string) $payload['nivel_confianza_o_prioridad'],
             ':risks_and_warnings'        => (string) $payload['riesgos_o_advertencias'],
@@ -787,10 +1104,27 @@ class IntegrationService
         $audit = $stmt->fetch();
 
         if (!$audit) {
-            return ['ok' => false, 'message' => "No existe la propuesta de auditoría #{$auditId}."];
+            return ['ok' => false, 'error_code' => 'ERR_ENTIDAD_NO_ENCONTRADA', 'message' => "No existe la propuesta de auditoría #{$auditId}."];
         }
 
-        $normalizedDecision = strtolower(trim($decision)) === 'aprobado' ? 'aprobado' : 'rechazado';
+        // La decisión y el revisor son obligatorios: nunca se aprueba por defecto
+        $normalizedDecision = strtolower(trim($decision));
+        $reviewerName = trim($reviewerName);
+        $invalid = [];
+        if (!in_array($normalizedDecision, ['aprobado', 'rechazado'], true)) {
+            $invalid[] = 'decision (aprobado | rechazado)';
+        }
+        if ($reviewerName === '') {
+            $invalid[] = 'reviewed_by';
+        }
+        if (!empty($invalid)) {
+            return [
+                'ok'             => false,
+                'error_code'     => 'ERR_CAMPOS_OBLIGATORIOS',
+                'invalid_fields' => $invalid,
+                'message'        => 'Revisión rechazada. Campos obligatorios ausentes o inválidos: ' . implode(', ', $invalid),
+            ];
+        }
         $now = date('Y-m-d H:i:s');
 
         // Obtener datos del ticket para el envío a Telegram vía n8n
@@ -798,49 +1132,49 @@ class IntegrationService
         $stmtTicket->execute([':ref' => $audit['ticket_ref']]);
         $ticket = $stmtTicket->fetch();
 
-        $telegramDispatched = 0;
-        $webhookInfo = null;
+        $chatId = $ticket ? $this->stringOrNull($ticket['telegram_chat_id'] ?? null) : null;
+        $noChatId = $normalizedDecision === 'aprobado' && $chatId === null;
+        $outboxId = null;
 
-        if ($normalizedDecision === 'aprobado') {
-            $webhookInfo = WebhookNotifier::dispatch('N8N_WEBHOOK_HUMAN_REVIEW_URL', 'ai.proposal.approved', [
-                'audit_id'                 => $auditId,
-                'ticket_ref'               => $audit['ticket_ref'],
-                'order_ref'                => $audit['order_ref'],
-                'approved_action'          => $audit['proposed_action'],
-                'customer_telegram_chat_id'=> $ticket['telegram_chat_id'] ?? '@laura_cliente_test',
-                'customer_message'         => $audit['proposed_customer_message'],
-                'reviewed_by'              => $reviewerName,
-                'reviewed_at'              => $now,
-            ]);
-            $telegramDispatched = 1;
-
-            // Resolver ticket y calcular tiempo de resolución
-            if ($ticket) {
-                $createdTs = strtotime((string) $ticket['created_at']);
-                $diffMinutes = max(12, (int) round((time() - $createdTs) / 60));
-                $this->db->prepare('
-                    UPDATE erp_tickets
-                    SET status = "RESUELTA",
-                        resolution_notes = :notes,
-                        resolved_at = :resolved_at,
-                        simulated_resolution_minutes = COALESCE(simulated_resolution_minutes, :mins)
-                    WHERE ticket_ref = :ref
-                ')->execute([
-                    ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Notificación enviada por Telegram.",
-                    ':resolved_at' => $now,
-                    ':mins'        => $diffMinutes,
-                    ':ref'         => $audit['ticket_ref'],
-                ]);
-            }
-
-            // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
-            if (!empty($audit['order_ref'])) {
-                $this->db->prepare('
-                    UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
-                ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
-            }
-        } else {
-            if ($ticket) {
+        // 1) PRIMERO se guarda la decisión humana (y, si hay que notificar, el aviso para n8n) en una transacción
+        $this->db->beginTransaction();
+        try {
+            if ($normalizedDecision === 'aprobado' && $noChatId) {
+                // Sin chat_id no se puede notificar por Telegram: no se intenta y queda constancia
+                if ($ticket) {
+                    $this->db->prepare('
+                        UPDATE erp_tickets
+                        SET status = "RESUELTA", resolution_notes = :notes, resolved_at = :resolved_at
+                        WHERE ticket_ref = :ref
+                    ')->execute([
+                        ':notes'       => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Sin chat_id de Telegram: no se notifica por Telegram (avisar al cliente por otro canal).",
+                        ':resolved_at' => $now,
+                        ':ref'         => $audit['ticket_ref'],
+                    ]);
+                }
+            } elseif ($normalizedDecision === 'aprobado') {
+                // Aprobada: la incidencia NO se da por resuelta hasta que n8n confirme la notificación (2xx)
+                if ($ticket) {
+                    $this->db->prepare('
+                        UPDATE erp_tickets
+                        SET status = "APROBADA_PENDIENTE_NOTIFICACION", resolution_notes = :notes
+                        WHERE ticket_ref = :ref
+                    ')->execute([
+                        ':notes' => "Acción IA aprobada por {$reviewerName}: {$audit['proposed_action']}. Pendiente de que n8n confirme la notificación por Telegram.",
+                        ':ref'   => $audit['ticket_ref'],
+                    ]);
+                }
+                $outboxId = $this->enqueueWebhook('N8N_WEBHOOK_HUMAN_REVIEW_URL', 'ai.proposal.approved', [
+                    'audit_id'                  => $auditId,
+                    'ticket_ref'                => $audit['ticket_ref'],
+                    'order_ref'                 => $audit['order_ref'],
+                    'approved_action'           => $audit['proposed_action'],
+                    'customer_telegram_chat_id' => $chatId,
+                    'customer_message'          => $audit['proposed_customer_message'],
+                    'reviewed_by'               => $reviewerName,
+                    'reviewed_at'               => $now,
+                ], 'ai_review', (string) $auditId);
+            } elseif ($ticket) {
                 $this->db->prepare('
                     UPDATE erp_tickets
                     SET status = "ABIERTA_MANUAL",
@@ -851,26 +1185,54 @@ class IntegrationService
                     ':ref'   => $audit['ticket_ref'],
                 ]);
             }
+
+            // Si el pedido asociado existe y la acción implica incidencia/reemplazo, reflejarlo
+            //    (solo si la transición está permitida: un pedido cancelado no pasa a incidencia)
+            if ($normalizedDecision === 'aprobado' && !empty($audit['order_ref'])) {
+                $stmtOrder = $this->db->prepare('SELECT order_status FROM erp_orders WHERE order_ref = :r LIMIT 1');
+                $stmtOrder->execute([':r' => $audit['order_ref']]);
+                $currentStatus = $stmtOrder->fetchColumn();
+                if ($currentStatus !== false && $this->isAllowedTransition((string) $currentStatus, 'incidencia')) {
+                    $this->db->prepare('
+                        UPDATE erp_orders SET order_status = "incidencia", updated_at = :u WHERE order_ref = :r
+                    ')->execute([':u' => $now, ':r' => $audit['order_ref']]);
+                }
+            }
+
+            $this->db->prepare('
+                UPDATE erp_ai_audits
+                SET final_status = :status,
+                    reviewed_by = :reviewer,
+                    review_comment = :comment,
+                    reviewed_at = :reviewed_at,
+                    telegram_notified = 0
+                WHERE id = :id
+            ')->execute([
+                ':status'      => $normalizedDecision,
+                ':reviewer'    => $reviewerName,
+                ':comment'     => $this->stringOrNull($comment),
+                ':reviewed_at' => $now,
+                ':id'          => $auditId,
+            ]);
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
         }
 
-        $this->db->prepare('
-            UPDATE erp_ai_audits
-            SET final_status = :status,
-                reviewed_by = :reviewer,
-                review_comment = :comment,
-                reviewed_at = :reviewed_at,
-                telegram_notified = :tg
-            WHERE id = :id
-        ')->execute([
-            ':status'      => $normalizedDecision,
-            ':reviewer'    => $reviewerName,
-            ':comment'     => $comment ?: ($normalizedDecision === 'aprobado' ? 'Verificado y autorizado para envío por Telegram.' : 'Descartado por el supervisor.'),
-            ':reviewed_at' => $now,
-            ':tg'          => $telegramDispatched,
-            ':id'          => $auditId,
-        ]);
+        // 2) DESPUÉS se envía a n8n. Si responde 2xx, deliverWebhook() marca telegram_notified = 1 y resuelve
+        //    la incidencia; si no, queda pendiente para el reintento y el fallo queda en el log.
+        $webhookInfo = $outboxId !== null ? $this->deliverWebhook($outboxId) : null;
+        $telegramDispatched = ($webhookInfo['dispatched'] ?? false) ? 1 : 0;
 
         $msg = "Supervisión humana registrada: Propuesta #{$auditId} ({$audit['ticket_ref']}) marcada como '" . strtoupper($normalizedDecision) . "' por {$reviewerName}.";
+        if ($noChatId) {
+            $msg .= ' Sin chat_id: no se notifica por Telegram.';
+        } elseif ($normalizedDecision === 'aprobado') {
+            $msg .= $telegramDispatched === 1
+                ? ' Notificación entregada a n8n para Telegram.'
+                : ' ATENCIÓN: la notificación por Telegram no se ha podido enviar (queda pendiente de reintento).';
+        }
         $res = [
             'ok'                => true,
             'audit_id'          => $auditId,
@@ -897,6 +1259,182 @@ class IntegrationService
         );
 
         return $res;
+    }
+
+    // =========================================================================
+    // BANDEJA DE SALIDA HACIA n8n (outbox) Y REINTENTOS
+    // Patrón: primero se guarda el cambio y el aviso (misma transacción) y después se envía.
+    // Si n8n no responde 2xx, el aviso queda PENDIENTE y se reintenta con el MISMO cuerpo y event_id.
+    // =========================================================================
+
+    /** Número máximo de intentos de envío de cada aviso (después queda FALLIDO). */
+    public const MAX_WEBHOOK_ATTEMPTS = 5;
+
+    /** Guarda un aviso para n8n en la bandeja de salida (llamar dentro de la transacción del cambio). */
+    private function enqueueWebhook(string $targetEnvKey, string $eventType, array $data, string $entityType, string $entityRef): int
+    {
+        $built = WebhookNotifier::buildBody($eventType, $data);
+        $this->db->prepare('
+            INSERT INTO erp_outbox_webhooks (event_id, event_type, target_env_key, body_json, entity_type, entity_ref, status, attempts, created_at)
+            VALUES (:event_id, :event_type, :target, :body, :entity_type, :entity_ref, "PENDIENTE", 0, :created_at)
+        ')->execute([
+            ':event_id'    => $built['event_id'],
+            ':event_type'  => $eventType,
+            ':target'      => $targetEnvKey,
+            ':body'        => $built['body'],
+            ':entity_type' => $entityType,
+            ':entity_ref'  => $entityRef,
+            ':created_at'  => date('Y-m-d H:i:s'),
+        ]);
+        return (int) $this->db->lastInsertId();
+    }
+
+    /** Intenta entregar un aviso de la bandeja de salida y aplica sus efectos si n8n responde 2xx. */
+    public function deliverWebhook(int $outboxId): array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM erp_outbox_webhooks WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $outboxId]);
+        $row = $stmt->fetch();
+        if (!$row || $row['status'] !== 'PENDIENTE') {
+            return ['dispatched' => false, 'http_code' => 0, 'note' => "Aviso #{$outboxId} inexistente o ya no está pendiente."];
+        }
+
+        $startTime = microtime(true);
+        $result = WebhookNotifier::send($row['target_env_key'], $row['event_type'], $row['body_json']);
+        $attempts = (int) $row['attempts'] + 1;
+        $now = date('Y-m-d H:i:s');
+        $result['event_id'] = $row['event_id'];
+        $result['attempt'] = $attempts;
+
+        if ($result['dispatched']) {
+            $this->db->beginTransaction();
+            $this->db->prepare('
+                UPDATE erp_outbox_webhooks
+                SET status = "ENVIADO", attempts = :a, last_http_code = :c, last_error = NULL, last_attempt_at = :t, sent_at = :t
+                WHERE id = :id
+            ')->execute([':a' => $attempts, ':c' => $result['http_code'], ':t' => $now, ':id' => $outboxId]);
+            $this->applyDeliveryEffects($row, $result, $now);
+            $this->db->commit();
+            return $result;
+        }
+
+        $exhausted = $attempts >= self::MAX_WEBHOOK_ATTEMPTS;
+        $this->db->prepare('
+            UPDATE erp_outbox_webhooks
+            SET status = :s, attempts = :a, last_http_code = :c, last_error = :e, last_attempt_at = :t
+            WHERE id = :id
+        ')->execute([
+            ':s'  => $exhausted ? 'FALLIDO' : 'PENDIENTE',
+            ':a'  => $attempts,
+            ':c'  => $result['http_code'],
+            ':e'  => $result['note'],
+            ':t'  => $now,
+            ':id' => $outboxId,
+        ]);
+        if ($exhausted) {
+            $this->markDeliveryExhausted($row);
+        }
+        $result['exhausted'] = $exhausted;
+
+        // Cada intento fallido queda en el log (alimenta «errores por tipo» del cuadro de mando)
+        $isTelegram = $row['entity_type'] === 'ai_review';
+        $this->logExecution(
+            'exec_outbox_' . bin2hex(random_bytes(4)),
+            $isTelegram ? 'ESCENARIO_3_SUPERVISION_HUMANA' : 'ESCENARIO_2_SINCRONIZACION',
+            $row['event_type'],
+            $isTelegram ? 'BackOffice -> n8n -> Telegram' : 'BackOffice -> n8n -> eCommerce',
+            $row['entity_ref'],
+            'ERROR',
+            $isTelegram ? 'ERR_NOTIFICACION_TELEGRAM' : 'ERR_SINCRONIZACION_N8N',
+            "Intento {$attempts}/" . self::MAX_WEBHOOK_ATTEMPTS . " de {$row['event_id']} fallido: {$result['note']}"
+                . ($exhausted ? ' Se agotan los reintentos: queda FALLIDO.' : ' Queda pendiente de reintento.'),
+            ['outbox_id' => $outboxId, 'event_id' => $row['event_id']],
+            $result,
+            $startTime
+        );
+        return $result;
+    }
+
+    /**
+     * Reintenta los avisos PENDIENTES (lo llama un cron con bin/retry_webhooks.php o n8n con
+     * POST /api/v1/internal/webhooks/retry). Mismo cuerpo y mismo event_id que el primer intento.
+     */
+    public function retryPendingWebhooks(int $limit = 50): array
+    {
+        $stmt = $this->db->prepare('SELECT id FROM erp_outbox_webhooks WHERE status = "PENDIENTE" ORDER BY id ASC LIMIT :l');
+        $stmt->bindValue(':l', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        $ids = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+
+        $summary = ['processed' => 0, 'sent' => 0, 'still_pending' => 0, 'failed' => 0, 'details' => []];
+        foreach ($ids as $id) {
+            $r = $this->deliverWebhook($id);
+            $summary['processed']++;
+            if ($r['dispatched']) {
+                $summary['sent']++;
+            } elseif (!empty($r['exhausted'])) {
+                $summary['failed']++;
+            } else {
+                $summary['still_pending']++;
+            }
+            $summary['details'][] = ['outbox_id' => $id, 'event_id' => $r['event_id'] ?? null, 'dispatched' => $r['dispatched'], 'note' => $r['note']];
+        }
+        return $summary;
+    }
+
+    /** Efectos de un aviso entregado (n8n respondió 2xx). */
+    private function applyDeliveryEffects(array $row, array $result, string $now): void
+    {
+        switch ($row['entity_type']) {
+            case 'order':
+                if (!$this->hasUndeliveredWebhooks('order', $row['entity_ref'])) {
+                    $this->db->prepare('UPDATE erp_orders SET sync_status = "SINCRONIZADO" WHERE order_ref = :r')
+                        ->execute([':r' => $row['entity_ref']]);
+                }
+                break;
+            case 'inventory':
+                if (!$this->hasUndeliveredWebhooks('inventory', $row['entity_ref'])) {
+                    $this->db->prepare('UPDATE erp_inventory SET sync_status = "SINCRONIZADO" WHERE sku = :r')
+                        ->execute([':r' => $row['entity_ref']]);
+                }
+                break;
+            case 'ai_review':
+                // Notificación confirmada por n8n: ahora sí telegram_notified = 1 y la incidencia queda resuelta
+                $auditId = (int) $row['entity_ref'];
+                $this->db->prepare('UPDATE erp_ai_audits SET telegram_notified = 1 WHERE id = :id')->execute([':id' => $auditId]);
+                $this->db->prepare('
+                    UPDATE erp_tickets
+                    SET status = "RESUELTA", resolved_at = :t,
+                        resolution_notes = COALESCE(resolution_notes, "") || :note
+                    WHERE ticket_ref = (SELECT ticket_ref FROM erp_ai_audits WHERE id = :id)
+                      AND status = "APROBADA_PENDIENTE_NOTIFICACION"
+                ')->execute([
+                    ':t'    => $now,
+                    ':note' => " Notificación por Telegram confirmada por n8n (HTTP {$result['http_code']}, intento {$result['attempt']}).",
+                    ':id'   => $auditId,
+                ]);
+                break;
+        }
+    }
+
+    /** Se agotaron los reintentos: queda constancia en la entidad afectada. */
+    private function markDeliveryExhausted(array $row): void
+    {
+        if ($row['entity_type'] === 'order') {
+            $this->db->prepare('UPDATE erp_orders SET sync_status = "ERROR_SINCRONIZACION" WHERE order_ref = :r')->execute([':r' => $row['entity_ref']]);
+        } elseif ($row['entity_type'] === 'inventory') {
+            $this->db->prepare('UPDATE erp_inventory SET sync_status = "ERROR_SINCRONIZACION" WHERE sku = :r')->execute([':r' => $row['entity_ref']]);
+        }
+    }
+
+    private function hasUndeliveredWebhooks(string $entityType, string $entityRef): bool
+    {
+        $stmt = $this->db->prepare('
+            SELECT 1 FROM erp_outbox_webhooks
+            WHERE entity_type = :t AND entity_ref = :r AND status IN ("PENDIENTE", "FALLIDO") LIMIT 1
+        ');
+        $stmt->execute([':t' => $entityType, ':r' => $entityRef]);
+        return $stmt->fetchColumn() !== false;
     }
 
     // =========================================================================
@@ -944,12 +1482,13 @@ class IntegrationService
             ORDER BY total DESC
         ')->fetchAll();
 
-        // e. Incidencias abiertas vs cerradas y f. Tiempo medio simulado de resolución
+        // e. Incidencias abiertas vs cerradas y f. Tiempo medio de resolución REAL (resolved_at − created_at, sin mínimos)
         $ticketStats = $this->db->query('
             SELECT COUNT(*) AS total_tickets,
                    SUM(CASE WHEN status != "RESUELTA" THEN 1 ELSE 0 END) AS open_tickets,
                    SUM(CASE WHEN status = "RESUELTA" THEN 1 ELSE 0 END) AS resolved_tickets,
-                   ROUND(AVG(CASE WHEN simulated_resolution_minutes IS NOT NULL THEN simulated_resolution_minutes END), 1) AS avg_resolution_minutes
+                   ROUND(AVG(CASE WHEN resolved_at IS NOT NULL
+                                  THEN (julianday(resolved_at) - julianday(created_at)) * 1440 END), 1) AS avg_resolution_minutes
             FROM erp_tickets
         ')->fetch();
 
@@ -972,19 +1511,26 @@ class IntegrationService
             ORDER BY total DESC
         ')->fetchAll();
 
-        // h. Tasa de conversión del flujo definido (Funnel desde product.viewed -> order.created)
-        $funnelRows = $this->db->query('SELECT event_name, event_label, total_count FROM erp_funnel_counters')->fetchAll();
-        $funnelMap = [];
-        foreach ($funnelRows as $r) {
-            $funnelMap[$r['event_name']] = (int) $r['total_count'];
-        }
-        $views = max(1, $funnelMap['product.viewed'] ?? 1);
-        $checkouts = max(1, $funnelMap['checkout.started'] ?? 1);
-        $ordersCreated = $funnelMap['order.created'] ?? (int) ($ordTotals['total_orders'] ?? 0);
-        $paymentsDone = $funnelMap['payment.simulated'] ?? $ordersCreated;
+        // h. Tasa de conversión del flujo definido. Solo etapas que el Back-Office recibe de verdad
+        //    (no recibe product.viewed, cart.item_added ni checkout.started): todo sale de las tablas, sin contadores ni mínimos.
+        $funnelRow = $this->db->query('
+            SELECT (SELECT COUNT(*) FROM erp_orders) AS orders_integrated,
+                   (SELECT COUNT(*) FROM erp_orders WHERE payment_status = "pagado_simulado") AS orders_paid,
+                   (SELECT COUNT(DISTINCT t.order_ref) FROM erp_tickets t
+                      JOIN erp_orders o ON o.order_ref = t.order_ref) AS orders_with_ticket
+        ')->fetch();
+        $ordersIntegrated = (int) ($funnelRow['orders_integrated'] ?? 0);
+        $ordersPaid = (int) ($funnelRow['orders_paid'] ?? 0);
+        $ordersWithTicket = (int) ($funnelRow['orders_with_ticket'] ?? 0);
 
-        $globalConversionRate = round(($ordersCreated / $views) * 100, 2);
-        $checkoutToOrderRate = round(($paymentsDone / $checkouts) * 100, 2);
+        $funnel = [
+            'orders_integrated'  => $ordersIntegrated,
+            'orders_paid'        => $ordersPaid,
+            'orders_with_ticket' => $ordersWithTicket,
+        ];
+        // Sin datos no hay tasa (null), en lugar de inventar un denominador
+        $paidRate = $ordersIntegrated > 0 ? round($ordersPaid / $ordersIntegrated * 100, 2) : null;
+        $ticketRate = $ordersPaid > 0 ? round($ordersWithTicket / $ordersPaid * 100, 2) : null;
 
         // j. Acciones propuestas por el agente y acciones aprobadas
         $aiStats = $this->db->query('
@@ -993,6 +1539,13 @@ class IntegrationService
                    SUM(CASE WHEN final_status = "rechazado" THEN 1 ELSE 0 END) AS rejected_proposals,
                    SUM(CASE WHEN final_status = "pendiente_de_revision" THEN 1 ELSE 0 END) AS pending_proposals
             FROM erp_ai_audits
+        ')->fetch();
+
+        // Avisos a n8n pendientes de entregar o fallidos (bandeja de salida)
+        $outboxStats = $this->db->query('
+            SELECT SUM(CASE WHEN status = "PENDIENTE" THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN status = "FALLIDO" THEN 1 ELSE 0 END) AS failed
+            FROM erp_outbox_webhooks
         ')->fetch();
 
         // Stock bajo en almacén
@@ -1013,7 +1566,8 @@ class IntegrationService
                 'total'                  => (int) ($ticketStats['total_tickets'] ?? 0),
                 'open'                   => (int) ($ticketStats['open_tickets'] ?? 0),
                 'resolved'               => (int) ($ticketStats['resolved_tickets'] ?? 0),
-                'avg_resolution_minutes' => (float) ($ticketStats['avg_resolution_minutes'] ?? 0.0),
+                // null si todavía no hay ninguna incidencia resuelta
+                'avg_resolution_minutes' => $ticketStats['avg_resolution_minutes'] !== null ? (float) $ticketStats['avg_resolution_minutes'] : null,
             ],
             'integration' => [
                 'total_events'   => (int) ($logStats['total_events'] ?? 0),
@@ -1021,11 +1575,13 @@ class IntegrationService
                 'failed_events'  => (int) ($logStats['failed_events'] ?? 0),
                 'avg_latency_ms' => (float) ($logStats['avg_latency_ms'] ?? 0.0),
                 'errors_by_type' => $errorsByType,
+                'pending_webhooks' => (int) ($outboxStats['pending'] ?? 0),
+                'failed_webhooks'  => (int) ($outboxStats['failed'] ?? 0),
             ],
             'conversion' => [
-                'funnel'                 => $funnelMap,
-                'global_conversion_pct'  => $globalConversionRate,
-                'checkout_to_paid_pct'   => $checkoutToOrderRate,
+                'funnel'                  => $funnel,
+                'integrated_to_paid_pct'  => $paidRate,
+                'paid_with_ticket_pct'    => $ticketRate,
             ],
             'ai_agent' => [
                 'total_proposals'    => (int) ($aiStats['total_proposals'] ?? 0),
@@ -1039,30 +1595,130 @@ class IntegrationService
         ];
     }
 
-    public function incrementFunnelCounter(string $eventName, int $delta = 1): void
+    /**
+     * ¿Puede un evento de la tienda hacer avanzar el pedido de $from a $to?
+     * Las transiciones del back-office (ORDER_TRANSITIONS) más el cobro en la tienda (creado -> pagado),
+     * que la tienda hace sin pasar por el back-office.
+     */
+    private function isAllowedEventTransition(string $from, string $to): bool
     {
-        $labels = [
-            'product.viewed'    => 'Fichas de producto vistas (product.viewed)',
-            'cart.item_added'   => 'Productos añadidos al carrito (cart.item_added)',
-            'checkout.started'  => 'Checkouts iniciados (checkout.started)',
-            'order.created'     => 'Pedidos creados e integrados (order.created)',
-            'payment.simulated' => 'Pagos confirmados Redsys/Simulado (payment.simulated)',
-            'support.requested' => 'Incidencias postventa (support.requested)',
+        $paymentSteps = [
+            'creado'          => ['pagado_simulado', 'pendiente_preparacion'],
+            'pagado_simulado' => ['pendiente_preparacion'],
         ];
-        $label = $labels[$eventName] ?? $eventName;
-        $now = date('Y-m-d H:i:s');
+        return $this->isAllowedTransition($from, $to) || in_array($to, $paymentSteps[$from] ?? [], true);
+    }
 
-        $stmt = $this->db->prepare('SELECT total_count FROM erp_funnel_counters WHERE event_name = :name LIMIT 1');
-        $stmt->execute([':name' => $eventName]);
-        $row = $stmt->fetch();
+    private function isEventProcessed(string $eventId): bool
+    {
+        $stmt = $this->db->prepare('SELECT 1 FROM erp_processed_events WHERE event_id = :id LIMIT 1');
+        $stmt->execute([':id' => $eventId]);
+        return $stmt->fetchColumn() !== false;
+    }
 
-        if ($row) {
-            $this->db->prepare('UPDATE erp_funnel_counters SET total_count = total_count + :d, updated_at = :u WHERE event_name = :n')
-                ->execute([':d' => $delta, ':u' => $now, ':n' => $eventName]);
-        } else {
-            $this->db->prepare('INSERT INTO erp_funnel_counters (event_name, event_label, total_count, updated_at) VALUES (:n, :l, :c, :u)')
-                ->execute([':n' => $eventName, ':l' => $label, ':c' => max(0, $delta), ':u' => $now]);
+    private function markEventProcessed(string $eventId, string $eventType, string $entityRef): void
+    {
+        $this->db->prepare('
+            INSERT INTO erp_processed_events (event_id, event_type, entity_ref, processed_at)
+            VALUES (:id, :type, :ref, :at)
+        ')->execute([':id' => $eventId, ':type' => $eventType, ':ref' => $entityRef, ':at' => date('Y-m-d H:i:s')]);
+    }
+
+    /** Respuesta (HTTP 200) para un evento ya procesado: no se vuelve a aplicar y queda constancia en el log. */
+    private function duplicateResponse(string $executionId, string $scenario, string $eventType, string $direction, string $entityRef, string $eventId, array $payload, float $startTime): array
+    {
+        $msg = "Evento {$eventId} ya procesado anteriormente: se ignora (duplicate).";
+        $res = [
+            'ok'           => true,
+            'result'       => 'duplicate',
+            'execution_id' => $executionId,
+            'scenario'     => $scenario,
+            'event_id'     => $eventId,
+            'message'      => $msg,
+        ];
+        $this->logExecution($executionId, $scenario, $eventType, $direction, $entityRef ?: 'N/A', 'DUPLICADO', null, $msg, $payload, $res, $startTime);
+        return $res;
+    }
+
+    /** ¿Se puede pasar de $from a $to según ORDER_TRANSITIONS? */
+    public function isAllowedTransition(string $from, string $to): bool
+    {
+        return in_array($to, self::ORDER_TRANSITIONS[$from] ?? [], true);
+    }
+
+    /**
+     * Comprueba que todos los SKU del pedido existen en el almacén y tienen stock suficiente
+     * (sumando las cantidades si un SKU aparece en varias líneas). Devuelve null si todo está bien.
+     */
+    private function checkSkusAndStock(array $items): ?array
+    {
+        $qtyBySku = [];
+        foreach ($items as $item) {
+            $sku = strtoupper(trim((string) $item['sku']));
+            $qtyBySku[$sku] = ($qtyBySku[$sku] ?? 0) + (int) $item['quantity'];
         }
+
+        $stmt = $this->db->prepare('SELECT stock_available FROM erp_inventory WHERE sku = :sku LIMIT 1');
+        $unknown = [];
+        $insufficient = [];
+        foreach ($qtyBySku as $sku => $qty) {
+            $stmt->execute([':sku' => $sku]);
+            $stock = $stmt->fetchColumn();
+            if ($stock === false) {
+                $unknown[] = $sku;
+            } elseif ((int) $stock < $qty) {
+                $insufficient[] = ['sku' => $sku, 'requested' => $qty, 'available' => (int) $stock];
+            }
+        }
+
+        if (!empty($unknown)) {
+            return [
+                'error_code' => 'ERR_ENTIDAD_NO_ENCONTRADA',
+                'details'    => ['unknown_skus' => $unknown],
+                'message'    => 'Pedido rechazado: SKU no registrados en el almacén del Back-Office: ' . implode(', ', $unknown),
+            ];
+        }
+        if (!empty($insufficient)) {
+            $parts = array_map(fn ($r) => "{$r['sku']} (pedidas {$r['requested']}, disponibles {$r['available']})", $insufficient);
+            return [
+                'error_code' => 'ERR_STOCK_INSUFICIENTE',
+                'details'    => ['insufficient_stock' => $insufficient],
+                'message'    => 'Pedido rechazado: stock insuficiente en ' . implode(', ', $parts),
+            ];
+        }
+        return null;
+    }
+
+    /** Número de un payload JSON (int, float o texto numérico), o null si falta o no es numérico. */
+    private function numberOrNull(mixed $value): ?float
+    {
+        if (is_int($value) || is_float($value)) {
+            return (float) $value;
+        }
+        if (is_string($value) && is_numeric(trim($value))) {
+            return (float) trim($value);
+        }
+        return null;
+    }
+
+    /** Texto opcional: null si falta o está vacío (nunca un valor inventado). */
+    private function stringOrNull(mixed $value): ?string
+    {
+        if ($value === null || is_array($value)) {
+            return null;
+        }
+        $text = trim((string) $value);
+        return $text === '' ? null : $text;
+    }
+
+    /** Estado de pago según el estado del pedido (mismos estados cobrados que Order::PAID_STATUSES de la tienda). */
+    private function paymentStatusFor(string $orderStatus): string
+    {
+        return match ($orderStatus) {
+            'creado'    => 'pendiente_pago',
+            'cancelado' => 'cancelado',
+            default     => 'pagado_simulado',
+        };
     }
 
     private function logExecution(

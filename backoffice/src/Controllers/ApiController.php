@@ -19,28 +19,8 @@ class ApiController
     public function handle(string $method, string $uri): void
     {
         header('Content-Type: application/json; charset=utf-8');
-        header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-        header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Integration-Token, X-Piquantum-Signature');
 
-        if ($method === 'OPTIONS') {
-            http_response_code(204);
-            exit;
-        }
-
-        // Verificar token de integración opcional si se envía cabecera X-Integration-Token incorrecta
-        $expectedToken = (string) Database::env('INTEGRATION_API_KEY', 'pq_bo_academic_token_2026_test');
-        $providedToken = $_SERVER['HTTP_X_INTEGRATION_TOKEN'] ?? ($_GET['api_token'] ?? null);
-        if ($providedToken !== null && $providedToken !== '' && $providedToken !== $expectedToken) {
-            $this->jsonResponse(401, [
-                'ok'         => false,
-                'error_code' => 'ERR_AUTH_TOKEN_INVALIDO',
-                'message'    => 'Token de integración X-Integration-Token inválido.',
-            ]);
-            return;
-        }
-
-        // Rutas API REST v1
+        // Health check público (sin token): lo usan Docker/Caddy para saber si el servicio está vivo.
         if ($method === 'GET' && $uri === '/api/v1/health') {
             $this->jsonResponse(200, [
                 'ok'        => true,
@@ -51,11 +31,58 @@ class ApiController
             return;
         }
 
+        // El resto de rutas exige el token de integración, solo por cabecera X-Integration-Token.
+        // Sin valor por defecto: si el servidor no lo tiene configurado, la API no se abre.
+        $expectedToken = (string) Database::secret('INTEGRATION_API_KEY');
+        if ($expectedToken === '') {
+            $this->jsonResponse(500, [
+                'ok'         => false,
+                'error_code' => 'ERR_CONFIGURACION',
+                'message'    => 'El servidor no tiene configurada la variable INTEGRATION_API_KEY.',
+            ]);
+            return;
+        }
+
+        $providedToken = (string) ($_SERVER['HTTP_X_INTEGRATION_TOKEN'] ?? '');
+        if ($providedToken === '') {
+            $this->jsonResponse(401, [
+                'ok'         => false,
+                'error_code' => 'ERR_AUTH_TOKEN_AUSENTE',
+                'message'    => 'Falta la cabecera X-Integration-Token.',
+            ]);
+            return;
+        }
+
+        // hash_equals compara en tiempo constante para no filtrar el token por el tiempo de respuesta.
+        if (!hash_equals($expectedToken, $providedToken)) {
+            $this->jsonResponse(401, [
+                'ok'         => false,
+                'error_code' => 'ERR_AUTH_TOKEN_INVALIDO',
+                'message'    => 'Token de integración X-Integration-Token inválido.',
+            ]);
+            return;
+        }
+
+        // Rutas API REST v1 (autenticadas)
+
         if ($method === 'GET' && $uri === '/api/v1/metrics') {
             $this->jsonResponse(200, [
                 'ok'      => true,
                 'metrics' => $this->service->getDashboardMetrics(),
             ]);
+            return;
+        }
+
+        // Carga inicial del catálogo desde la tienda (alta o actualización por sku, idempotente)
+        if ($method === 'POST' && $uri === '/api/v1/inventory/import') {
+            $result = $this->service->importInventory($this->readJsonBody());
+            $this->jsonResponse($result['ok'] ? 200 : 422, $result);
+            return;
+        }
+
+        // Reintento de los avisos pendientes hacia n8n (lo puede llamar un Schedule Trigger de n8n o un cron)
+        if ($method === 'POST' && $uri === '/api/v1/internal/webhooks/retry') {
+            $this->jsonResponse(200, ['ok' => true] + $this->service->retryPendingWebhooks());
             return;
         }
 
@@ -109,11 +136,13 @@ class ApiController
         if ($method === 'POST' && $uri === '/api/v1/agent/reviews') {
             $payload = $this->readJsonBody();
             $auditId = (int) ($payload['audit_id'] ?? 0);
-            $decision = (string) ($payload['decision'] ?? 'aprobado');
-            $reviewer = (string) ($payload['reviewed_by'] ?? 'Supervisor Telegram (Human-in-the-loop)');
-            $comment  = (string) ($payload['comment'] ?? 'Revisado desde callback de supervisión en Telegram.');
+            // Sin valores por defecto: sin decision o sin reviewed_by, la revisión se rechaza (422)
+            $decision = (string) ($payload['decision'] ?? '');
+            $reviewer = (string) ($payload['reviewed_by'] ?? '');
+            $comment  = (string) ($payload['comment'] ?? '');
             $result = $this->service->reviewAgentProposal($auditId, $decision, $reviewer, $comment);
-            $this->jsonResponse($result['ok'] ? 200 : 404, $result);
+            $status = $result['ok'] ? 200 : (($result['error_code'] ?? '') === 'ERR_ENTIDAD_NO_ENCONTRADA' ? 404 : 422);
+            $this->jsonResponse($status, $result);
             return;
         }
 

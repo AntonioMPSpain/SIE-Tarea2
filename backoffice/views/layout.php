@@ -1,7 +1,7 @@
 <?php
 /**
  * Vista principal del Sistema de Back-Office ERP & Cuadro de Mando Operativo — Piquantum (Tarea 2)
- * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs
+ * Variables disponibles: $tab, $flash, $metrics, $orders, $orderItemsByOrder, $inventory, $customers, $tickets, $audits, $logs, $currentUser, $csrfToken, $isLocalEnv
  */
 $pendingAuditsCount = (int) ($metrics['ai_agent']['pending_proposals'] ?? 0);
 $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
@@ -28,22 +28,19 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
             <span class="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold uppercase tracking-wider text-xs">Prototipo Académico</span>
             <span><strong>Sistema Independiente de Back-Office (ERP/CRM + Gobernanza IA)</strong> — Sin actividad comercial real. Datos ficticios de prueba (UCAM · Soluciones Informáticas para la Empresa · Tarea 2).</span>
         </div>
+        <?php if ($isLocalEnv): ?>
         <div class="flex items-center gap-2">
-            <form method="POST" action="/" class="inline">
+            <!-- Solo en desarrollo (APP_ENV=local): vaciar la base de datos para empezar de cero -->
+            <form method="POST" action="/" class="inline" onsubmit="return confirm('¿Vaciar la base de datos de desarrollo? Se borran pedidos, clientes, incidencias, propuestas y logs.');">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                 <input type="hidden" name="action" value="reset_before_integration">
                 <input type="hidden" name="return_tab" value="<?= htmlspecialchars($tab) ?>">
-                <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-medium transition" title="Limpia pedidos, tickets y logs para capturar el estado previo a la integración (Apartado 9.i)">
-                    📸 Estado ANTES de Integración
-                </button>
-            </form>
-            <form method="POST" action="/" class="inline">
-                <input type="hidden" name="action" value="seed_after_integration">
-                <input type="hidden" name="return_tab" value="<?= htmlspecialchars($tab) ?>">
-                <button type="submit" class="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition" title="Ejecuta los flujos de prueba de los Escenarios 1, 2 y 3 (Apartado 9.i)">
-                    ⚡ Cargar Estado DESPUÉS de Integración
+                <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-medium transition" title="Solo desarrollo: borra pedidos, clientes, incidencias, propuestas y logs">
+                    🧹 Vaciar BD (solo desarrollo)
                 </button>
             </form>
         </div>
+        <?php endif; ?>
     </div>
 
     <!-- CABECERA DEL BACK-OFFICE -->
@@ -87,6 +84,17 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     </a>
                 <?php endforeach; ?>
             </nav>
+
+            <!-- SESIÓN DEL OPERADOR -->
+            <div class="flex items-center gap-2 text-xs text-slate-400">
+                <span>👤 <?= htmlspecialchars((string) ($currentUser['email'] ?? '')) ?></span>
+                <form method="POST" action="/logout" class="inline">
+                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                    <button type="submit" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-medium transition">
+                        Cerrar sesión
+                    </button>
+                </form>
+            </div>
         </div>
     </header>
 
@@ -155,8 +163,9 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 <!-- Métrica 4: Tasa de conversión del flujo -->
                 <div class="card-glass rounded-xl p-4">
                     <div class="text-xs text-slate-400 font-medium uppercase">4. Tasa Conversión Flujo</div>
-                    <div class="text-3xl font-extrabold text-sky-400 mt-1"><?= number_format($metrics['conversion']['checkout_to_paid_pct'], 1, ',', '.') ?> %</div>
-                    <div class="text-xs text-slate-400 mt-1">Checkout → Pedido Integrado (Global: <?= number_format($metrics['conversion']['global_conversion_pct'], 1, ',', '.') ?>%)</div>
+                    <?php $paidPct = $metrics['conversion']['integrated_to_paid_pct']; $ticketPct = $metrics['conversion']['paid_with_ticket_pct']; ?>
+                    <div class="text-3xl font-extrabold text-sky-400 mt-1"><?= $paidPct === null ? '—' : number_format($paidPct, 1, ',', '.') . ' %' ?></div>
+                    <div class="text-xs text-slate-400 mt-1">Pedido integrado → pagado (con incidencia: <?= $ticketPct === null ? '—' : number_format($ticketPct, 1, ',', '.') . ' %' ?>)</div>
                 </div>
 
                 <!-- Métrica 5: Incidencias abiertas vs cerradas -->
@@ -169,11 +178,12 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     <div class="text-xs text-slate-400 mt-1">Integradas con Bot de Telegram</div>
                 </div>
 
-                <!-- Métrica 6: Tiempo medio simulado de resolución -->
+                <!-- Métrica 6: Tiempo medio real de resolución (resolved_at − created_at) -->
                 <div class="card-glass rounded-xl p-4">
                     <div class="text-xs text-slate-400 font-medium uppercase">6. Tiempo Medio Resolución</div>
-                    <div class="text-3xl font-extrabold text-purple-400 mt-1"><?= $metrics['tickets']['avg_resolution_minutes'] ?: 0 ?> min</div>
-                    <div class="text-xs text-slate-400 mt-1">MTTR desde apertura hasta aprobación IA</div>
+                    <?php $mttr = $metrics['tickets']['avg_resolution_minutes']; ?>
+                    <div class="text-3xl font-extrabold text-purple-400 mt-1"><?= $mttr === null ? '—' : number_format($mttr, 1, ',', '.') . ' min' ?></div>
+                    <div class="text-xs text-slate-400 mt-1">Desde la apertura hasta la notificación confirmada<?= $mttr === null ? ' (sin incidencias resueltas)' : '' ?></div>
                 </div>
 
                 <!-- Métrica 7: Acciones propuestas por el Agente IA vs Aprobadas -->
@@ -240,25 +250,25 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                         </div>
                         <div class="space-y-2.5 mt-2">
                             <?php
+                            // Solo etapas con datos reales del Back-Office (pedidos integrados por n8n y sus incidencias)
                             $funnel = $metrics['conversion']['funnel'];
-                            $maxVal = max(1, $funnel['product.viewed'] ?? 1);
+                            $base = (int) $funnel['orders_integrated'];
                             $funnelSteps = [
-                                ['product.viewed', '1. Fichas vistas (product.viewed)', 'bg-slate-500'],
-                                ['cart.item_added', '2. Carrito añadido (cart.item_added)', 'bg-sky-500'],
-                                ['checkout.started', '3. Checkout iniciado (checkout.started)', 'bg-indigo-500'],
-                                ['order.created', '4. Pedido integrado en Back-Office (order.created)', 'bg-emerald-500'],
+                                ['orders_integrated', '1. Pedidos integrados en Back-Office', 'bg-sky-500'],
+                                ['orders_paid', '2. Pedidos pagados (Redsys sandbox)', 'bg-emerald-500'],
+                                ['orders_with_ticket', '3. Pedidos con incidencia postventa', 'bg-amber-500'],
                             ];
                             foreach ($funnelSteps as [$fKey, $fLabel, $barColor]):
                                 $val = (int) ($funnel[$fKey] ?? 0);
-                                $pct = min(100, round(($val / $maxVal) * 100, 1));
+                                $pct = $base > 0 ? min(100, round(($val / $base) * 100, 1)) : 0;
                             ?>
                                 <div>
                                     <div class="flex justify-between text-xs mb-1">
                                         <span class="text-slate-300"><?= $fLabel ?></span>
-                                        <span class="font-mono font-bold text-white"><?= $val ?> eventos (<?= $pct ?>%)</span>
+                                        <span class="font-mono font-bold text-white"><?= $val ?> pedidos<?= $base > 0 ? " ({$pct}%)" : '' ?></span>
                                     </div>
                                     <div class="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                                        <div class="h-full <?= $barColor ?>" style="width: <?= max(4, $pct) ?>%"></div>
+                                        <div class="h-full <?= $barColor ?>" style="width: <?= $pct ?>%"></div>
                                     </div>
                                 </div>
                             <?php endforeach; ?>
@@ -329,7 +339,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 new Chart(document.getElementById('chartTopProducts'), {
                     type: 'bar',
                     data: {
-                        labels: topProducts.length ? topProducts.map(p => p.sku + ' (' + p.variant_size + ')') : ['Sin ventas'],
+                        labels: topProducts.length ? topProducts.map(p => p.sku) : ['Sin ventas'],
                         datasets: [{
                             label: 'Unidades solicitadas',
                             data: topProducts.length ? topProducts.map(p => Number(p.total_units)) : [0],
@@ -386,7 +396,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 <div class="card-glass rounded-xl p-10 text-center space-y-3">
                     <div class="text-4xl">📭</div>
                     <h3 class="text-base font-bold text-white">Back-Office sin pedidos integrados (Estado "Antes de la Integración")</h3>
-                    <p class="text-xs text-slate-400 max-w-lg mx-auto">Esta vista sirve como evidencia previa a la ejecución del flujo de n8n. Envía un pedido desde n8n o pulsa "Cargar Estado DESPUÉS de Integración" arriba a la derecha.</p>
+                    <p class="text-xs text-slate-400 max-w-lg mx-auto">Esta vista sirve como evidencia previa a la ejecución del flujo de n8n. Los pedidos aparecen aquí cuando llegan desde la tienda a través de n8n (no hay datos de demostración).</p>
                 </div>
             <?php else: ?>
                 <div class="space-y-4">
@@ -446,7 +456,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                             <tr>
                                                 <td class="py-2 font-mono text-amber-300"><?= htmlspecialchars($line['sku']) ?></td>
                                                 <td class="py-2 text-slate-200 font-medium"><?= htmlspecialchars($line['product_name']) ?></td>
-                                                <td class="py-2 text-slate-400"><?= htmlspecialchars($line['variant_size']) ?></td>
+                                                <td class="py-2 text-slate-400"><?= htmlspecialchars((string) ($line['variant_size'] ?? '—')) ?></td>
                                                 <td class="py-2 text-right font-mono"><?= (int) $line['quantity'] ?></td>
                                                 <td class="py-2 text-right font-mono"><?= number_format((float) $line['unit_price'], 2, ',', '.') ?> €</td>
                                                 <td class="py-2 text-right font-mono font-semibold text-white"><?= number_format((float) $line['line_total'], 2, ',', '.') ?> €</td>
@@ -458,6 +468,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
 
                             <!-- Formulario de Cambio Operativo / Sincronización (Escenario 2) -->
                             <form method="POST" action="/" class="bg-slate-900/90 rounded-lg p-3 border border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                                 <input type="hidden" name="action" value="update_order_status">
                                 <input type="hidden" name="order_ref" value="<?= htmlspecialchars($ord['order_ref']) ?>">
                                 <div class="text-xs text-slate-300 font-medium">
@@ -465,7 +476,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                 </div>
                                 <div class="flex flex-wrap items-center gap-2">
                                     <select name="new_status" class="bg-slate-800 border border-slate-700 rounded px-2.5 py-1 text-xs text-white">
-                                        <?php foreach (['pendiente_preparacion', 'enviado', 'incidencia', 'cancelado', 'pagado_simulado'] as $st): ?>
+                                        <?php foreach (array_merge([$ord['order_status']], \Piquantum\BackOffice\Services\IntegrationService::ORDER_TRANSITIONS[$ord['order_status']] ?? []) as $st): ?>
                                             <option value="<?= $st ?>" <?= $ord['order_status'] === $st ? 'selected' : '' ?>>Estado: <?= $st ?></option>
                                         <?php endforeach; ?>
                                     </select>
@@ -520,7 +531,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                         <?= htmlspecialchars($item['product_name']) ?>
                                         <span class="ml-1 text-rose-400"><?= str_repeat('🌶️', (int) $item['heat_level']) ?></span>
                                     </td>
-                                    <td class="p-3 text-slate-300"><?= htmlspecialchars($item['category']) ?> · <span class="font-mono"><?= htmlspecialchars($item['variant_size']) ?></span></td>
+                                    <td class="p-3 text-slate-300"><?= htmlspecialchars($item['category']) ?> · <span class="font-mono"><?= htmlspecialchars((string) ($item['variant_size'] ?? 'tamaño único')) ?></span></td>
                                     <td class="p-3 font-mono text-slate-400"><?= htmlspecialchars($item['warehouse_location']) ?></td>
                                     <td class="p-3 text-right font-mono"><?= number_format((float) $item['unit_price'], 2, ',', '.') ?> €</td>
                                     <td class="p-3 text-center">
@@ -531,6 +542,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                     <td class="p-3 text-center font-mono text-[11px] text-sky-300"><?= htmlspecialchars($item['sync_status']) ?></td>
                                     <td class="p-3 text-right">
                                         <form method="POST" action="/" class="inline-flex items-center gap-1.5">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                                             <input type="hidden" name="action" value="update_inventory_stock">
                                             <input type="hidden" name="sku" value="<?= htmlspecialchars($item['sku']) ?>">
                                             <input type="number" name="new_stock" min="0" max="500" value="<?= (int) $item['stock_available'] ?>"
@@ -641,14 +653,16 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                             <!-- PANEL DE REVISIÓN HUMANA (Human-in-the-loop) -->
                             <?php if ($isPending): ?>
                                 <form method="POST" action="/" class="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                                     <input type="hidden" name="action" value="review_ai_proposal">
                                     <input type="hidden" name="audit_id" value="<?= (int) $audit['id'] ?>">
                                     <div class="text-xs text-amber-200">
                                         🛑 <strong>Supervisión Humana Obligatoria:</strong> El agente tiene prohibido enviar la notificación a Telegram o comprometer reposición de stock sin tu aprobación explícita.
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
-                                        <input type="text" name="reviewer_name" value="Antonio Martínez (Supervisor)"
-                                               class="bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-white" placeholder="Nombre del revisor">
+                                        <span class="text-xs text-slate-300" title="El revisor es el operador con sesión iniciada">
+                                            👤 Revisa: <strong><?= htmlspecialchars((string) ($currentUser['email'] ?? '')) ?></strong>
+                                        </span>
                                         <input type="text" name="review_comment" value="Revisado stock y pedido; se autoriza envío a Telegram."
                                                class="bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-white w-64" placeholder="Comentario de auditoría">
                                         <button type="submit" name="decision" value="aprobado"
@@ -667,8 +681,9 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                         ✔️ <strong>Decisión humana registrada:</strong> Revisado por <strong><?= htmlspecialchars((string) $audit['reviewed_by']) ?></strong> el <?= htmlspecialchars((string) $audit['reviewed_at']) ?> —
                                         <em>"<?= htmlspecialchars((string) $audit['review_comment']) ?>"</em>
                                     </div>
-                                    <span class="font-mono text-[11px] <?= $audit['telegram_notified'] ? 'text-sky-400' : 'text-slate-500' ?>">
-                                        <?= $audit['telegram_notified'] ? '📲 Notificación enviada a Telegram Bot' : '🚫 Notificación a Telegram bloqueada' ?>
+                                    <?php $tgPending = !$audit['telegram_notified'] && $audit['final_status'] === 'aprobado'; ?>
+                                    <span class="font-mono text-[11px] <?= $audit['telegram_notified'] ? 'text-sky-400' : ($tgPending ? 'text-amber-400' : 'text-slate-500') ?>">
+                                        <?= $audit['telegram_notified'] ? '📲 n8n confirmó la notificación a Telegram' : ($tgPending ? '⚠️ Aprobada: notificación a Telegram no enviada' : '🚫 Sin notificación a Telegram') ?>
                                     </span>
                                 </div>
                             <?php endif; ?>
@@ -690,7 +705,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
 
             <div class="space-y-3">
                 <?php foreach ($logs as $log):
-                    $isOk = ($log['status'] === 'SUCCESS');
+                    $isOk = in_array($log['status'], ['SUCCESS', 'DUPLICADO'], true); // un duplicado no es un error
                 ?>
                     <details class="card-glass rounded-xl p-4 group">
                         <summary class="cursor-pointer list-none flex flex-wrap items-center justify-between gap-3">
@@ -756,6 +771,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     </div>
 
                     <form method="POST" action="/" class="space-y-3">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
                         <input type="hidden" name="action" value="simulate_payload">
                         <div>
                             <label class="block text-xs text-slate-400 mb-1">Endpoint / Contrato Destino:</label>
@@ -779,7 +795,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 <!-- Especificación de Endpoints API para n8n y Agente IA -->
                 <div class="card-glass rounded-xl p-5 space-y-4">
                     <h2 class="text-base font-bold text-white">📑 Contratos de Integración API REST (Para n8n y Tools del Agente IA)</h2>
-                    <p class="text-xs text-slate-400">Cabecera opcional de seguridad: <code class="text-amber-300">X-Integration-Token: pq_bo_academic_token_2026_test</code></p>
+                    <p class="text-xs text-slate-400">Cabecera obligatoria en todas las rutas salvo <code>/api/v1/health</code>: <code class="text-amber-300">X-Integration-Token: &lt;INTEGRATION_API_KEY del .env&gt;</code></p>
 
                     <div class="space-y-3 text-xs">
                         <div class="p-3 rounded-lg bg-slate-900 border border-slate-800">
@@ -815,24 +831,24 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     order_ok: {
                         type: 'order',
                         body: {
+                            event_id: "c4e8b2d1-6f3a-4d9c-8b7e-2a1f5d0c9e47",
                             execution_id: "exec_live_demo_01",
                             event_type: "order.created",
                             order_ref: "PQ-20261108-LIVE99",
                             occurred_at: "2026-11-08T19:30:00Z",
                             status: "pagado_simulado",
                             payment_method: "redsys_sandbox",
-                            shipping_address: "Calle Trapería 10, 30001 Murcia",
+                            shipping_address: "Avenida de Prueba 22, 41001 Sevilla",
                             customer: {
-                                id: "USR-LAURA-01",
-                                name: "Laura Gómez (Cliente Prueba)",
-                                email: "laura@example.com",
-                                phone: "+34 600 111 222"
+                                name: "Carlos Demo",
+                                email: "carlos@example.com"
                             },
                             items: [
-                                { sku: "PQ-HAB-200", product_name: "Lágrima de Habanero Rojo", variant_size: "200ml", quantity: 1, unit_price: 17.50 },
-                                { sku: "PQ-JAL-100", product_name: "Brisa Verde de Jalapeño y Lima", variant_size: "100ml", quantity: 2, unit_price: 8.90 }
+                                { sku: "SAL-001-100ML", product_name: "Salsa Carolina Reaper Inferno", variant_size: "100 ml", quantity: 1, unit_price: 12.90 },
+                                { sku: "SAL-003", product_name: "Salsa Verde Jalapeño & Lima", variant_size: null, quantity: 2, unit_price: 5.90 }
                             ],
-                            total_amount: 35.30
+                            shipping_amount: 4.95,
+                            total_amount: 29.65
                         }
                     },
                     order_error: {
@@ -851,7 +867,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                         body: {
                             execution_id: "exec_live_sync_02",
                             change_type: "ORDER_STATUS",
-                            order_ref: "PQ-20261108-F622LM",
+                            order_ref: "PQ-20261108-LIVE99",
                             new_status: "enviado",
                             priority: "URGENTE",
                             direction: "n8n Workflow -> BackOffice"
@@ -863,12 +879,11 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                             execution_id: "exec_live_inc_03",
                             event_type: "support.requested",
                             ticket_ref: "INC-20261108-9901",
-                            order_ref: "PQ-20261108-F622LM",
-                            customer_name: "Marta Hernández (Cliente Prueba)",
-                            customer_email: "marta@example.com",
-                            telegram_chat_id: "@marta_piquantum_test",
-                            subject: "Duda sobre conservación refrigerada de Néctar Mango & Habanero",
-                            description: "Hola, acabo de recibir el pedido PQ-20261108-F622LM y quería confirmar si una vez abierto el bote de Mango & Habanero debo conservarlo siempre en frío o si puedo devolver una unidad sin abrir.",
+                            order_ref: "PQ-20261108-LIVE99",
+                            customer_name: "Carlos Demo",
+                            customer_email: "carlos@example.com",
+                            subject: "Duda sobre la conservación de la Salsa Verde Jalapeño & Lima",
+                            description: "Hola, acabo de recibir el pedido PQ-20261108-LIVE99 y quería saber si la Salsa Verde Jalapeño & Lima hay que conservarla en frío una vez abierta.",
                             priority: "MEDIA"
                         }
                     }

@@ -9,17 +9,31 @@ use PDOException;
 
 class Database
 {
+    /** Versión de database/schema.sql (PRAGMA user_version). Subirla en cada cambio del esquema. */
+    public const SCHEMA_VERSION = 6;
+
+    /** Secretos sin los que la aplicación no arranca (ni con un valor por defecto ni con el de .env.example). */
+    public const REQUIRED_SECRETS = ['INTEGRATION_API_KEY', 'WEBHOOK_HMAC_SECRET'];
+
+    /** Valor de ejemplo de .env.example: se trata como «sin configurar». */
+    private const PLACEHOLDER = 'cambia-esto';
+
     private static ?PDO $pdo = null;
     private static array $env = [];
+    private static bool $envLoaded = false;
 
+    /**
+     * Carga las variables de backoffice/.env. Solo de .env (o de las variables de entorno del sistema):
+     * .env.example es una plantilla publicada en el repositorio y nunca se usa como configuración.
+     */
     public static function loadEnv(): void
     {
-        if (!empty(self::$env)) {
+        if (self::$envLoaded) {
             return;
         }
+        self::$envLoaded = true;
 
-        $baseDir = dirname(__DIR__);
-        $envFile = file_exists($baseDir . '/.env') ? $baseDir . '/.env' : $baseDir . '/.env.example';
+        $envFile = dirname(__DIR__) . '/.env';
 
         if (file_exists($envFile)) {
             $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -48,6 +62,19 @@ class Database
         return self::$env[$key] ?? $default;
     }
 
+    /** Secreto configurado, o null si falta o sigue con el valor de ejemplo «cambia-esto». */
+    public static function secret(string $key): ?string
+    {
+        $value = trim((string) self::env($key, ''));
+        return ($value === '' || strtolower($value) === self::PLACEHOLDER) ? null : $value;
+    }
+
+    /** Secretos obligatorios que faltan (o tienen el valor de ejemplo). Vacío si está todo configurado. */
+    public static function missingRequiredSecrets(): array
+    {
+        return array_values(array_filter(self::REQUIRED_SECRETS, fn (string $key) => self::secret($key) === null));
+    }
+
     public static function getConnection(): PDO
     {
         if (self::$pdo !== null) {
@@ -71,8 +98,9 @@ class Database
                     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 ]);
             } else {
-                $relPath = self::env('DB_SQLITE_PATH', 'storage/database/piquantum_erp.sqlite');
-                $fullPath = $baseDir . '/' . ltrim($relPath, '/\\');
+                // Ruta relativa a backoffice/ o absoluta (las pruebas usan un archivo temporal propio)
+                $sqlitePath = (string) self::env('DB_SQLITE_PATH', 'storage/database/piquantum_erp.sqlite');
+                $fullPath = str_starts_with($sqlitePath, '/') ? $sqlitePath : $baseDir . '/' . ltrim($sqlitePath, '/\\');
                 $dir = dirname($fullPath);
                 if (!is_dir($dir)) {
                     mkdir($dir, 0775, true);
@@ -97,6 +125,14 @@ class Database
         // Comprobar si la tabla erp_inventory ya existe
         try {
             $pdo->query('SELECT 1 FROM erp_inventory LIMIT 1');
+            // Base de datos ya creada: tiene que ser de la versión de esquema actual
+            $version = (int) $pdo->query('PRAGMA user_version')->fetchColumn();
+            if ($version !== self::SCHEMA_VERSION) {
+                throw new \RuntimeException(
+                    "La base de datos del Back-Office tiene un esquema antiguo (versión {$version}; se espera la "
+                    . self::SCHEMA_VERSION . '). En desarrollo, borra el archivo .sqlite para que se cree de nuevo.'
+                );
+            }
         } catch (PDOException) {
             $schemaFile = dirname(__DIR__) . '/database/schema.sql';
             if (file_exists($schemaFile)) {
