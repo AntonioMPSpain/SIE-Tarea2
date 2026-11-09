@@ -49,6 +49,15 @@ services:
       TZ: Europe/Madrid
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Falta N8N_ENCRYPTION_KEY en deploy/.env}
       N8N_DIAGNOSTICS_ENABLED: "false"
+      # Correo de n8n (invitaciones y recuperar contraseñas) con una cuenta de DonDominio.
+      # El remitente es la misma cuenta con la que se autentica (SPF y DKIM del dominio).
+      N8N_EMAIL_MODE: smtp
+      N8N_SMTP_HOST: smtp.dondominio.com
+      N8N_SMTP_PORT: "465"
+      N8N_SMTP_SSL: "true"
+      N8N_SMTP_USER: ${N8N_SMTP_USER:-}
+      N8N_SMTP_PASS: ${N8N_SMTP_PASS:-}
+      N8N_SMTP_SENDER: Piquantum n8n <${N8N_SMTP_USER:-}>
       # Code node: verificar firmas HMAC con el módulo crypto de Node
       NODE_FUNCTION_ALLOW_BUILTIN: crypto
       # El historial de ejecuciones es evidencia de la práctica: se guarda 60 días
