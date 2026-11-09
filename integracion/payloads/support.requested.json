@@ -1,0 +1,21 @@
+{
+  "event_id": "8f4d2b6e-1c7a-4e9b-a3d5-6b0e9c1f7a24",
+  "type": "support.requested",
+  "occurred_at": "2026-11-12T11:08:52+01:00",
+  "source": "piquantum-web",
+  "schema_version": "1.0",
+  "data": {
+    "ticket": {
+      "id": 4,
+      "subject": "Un bote ha llegado roto",
+      "message": "Hola, he recibido el pedido pero uno de los dos botes de Chipotle de 100 ml venía roto y la caja manchada. ¿Me podéis enviar otro?",
+      "status": "abierta"
+    },
+    "contact": {
+      "name": "Laura Prueba",
+      "email": "laura@example.com"
+    },
+    "customer_id": 1,
+    "order_reference": "PQ-20261110-A7K3QZ"
+  }
+}

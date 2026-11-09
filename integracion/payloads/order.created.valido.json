@@ -1,0 +1,52 @@
+{
+  "event_id": "9b2f6c1e-4a7d-4c2b-9f1e-2d6a8b0c3e51",
+  "type": "order.created",
+  "occurred_at": "2026-11-10T18:42:05+01:00",
+  "source": "piquantum-web",
+  "schema_version": "1.0",
+  "data": {
+    "order": {
+      "reference": "PQ-20261110-A7K3QZ",
+      "status": "creado",
+      "currency": "EUR",
+      "subtotal": 21.90,
+      "discount": 2.19,
+      "discount_code": "BIENVENIDA10",
+      "shipping": 4.95,
+      "tax": 4.28,
+      "total": 24.66
+    },
+    "customer": {
+      "id": 1,
+      "name": "Laura Prueba",
+      "email": "laura@example.com"
+    },
+    "shipping_address": {
+      "name": "Laura Prueba",
+      "address": "Calle Ficticia 1",
+      "city": "Madrid",
+      "postal_code": "28001",
+      "country": "España"
+    },
+    "lines": [
+      {
+        "product_code": "SAL-002-100ML",
+        "sku": "SAL-002",
+        "size": "100 ml",
+        "name": "Salsa Chipotle Ahumado",
+        "quantity": 2,
+        "unit_price": 6.50,
+        "line_total": 13.00
+      },
+      {
+        "product_code": "SAL-001-50ML",
+        "sku": "SAL-001",
+        "size": "50 ml",
+        "name": "Salsa Carolina Reaper Inferno",
+        "quantity": 1,
+        "unit_price": 8.90,
+        "line_total": 8.90
+      }
+    ]
+  }
+}

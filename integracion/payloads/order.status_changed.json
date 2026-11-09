@@ -1,0 +1,13 @@
+{
+  "event_id": "5a9c3f71-0e2d-4b6a-9c84-3e7f1b5d2a60",
+  "type": "order.status_changed",
+  "occurred_at": "2026-11-11T09:20:15+01:00",
+  "source": "piquantum-web",
+  "schema_version": "1.0",
+  "data": {
+    "order_reference": "PQ-20261110-A7K3QZ",
+    "previous_status": "pendiente_preparacion",
+    "status": "incidencia",
+    "origin": "backoffice"
+  }
+}
