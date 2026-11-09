@@ -1,0 +1,42 @@
+{
+  "event_id": "3d8e1a52-7c4b-4f0e-a1d9-5b6c2e8f9a07",
+  "type": "order.created",
+  "occurred_at": "2026-11-10T19:03:41+01:00",
+  "source": "piquantum-web",
+  "schema_version": "1.0",
+  "data": {
+    "order": {
+      "reference": "PQ-20261110-Q2M8LX",
+      "status": "creado",
+      "currency": "EUR",
+      "subtotal": 13.00,
+      "discount": 0.00,
+      "discount_code": null,
+      "shipping": 4.95,
+      "tax": 2.60,
+      "total": 15.00
+    },
+    "customer": {
+      "id": 2,
+      "name": "Carlos Demo"
+    },
+    "shipping_address": {
+      "name": "Carlos Demo",
+      "address": "Avenida de Prueba 22",
+      "city": "Sevilla",
+      "postal_code": "41001",
+      "country": "España"
+    },
+    "lines": [
+      {
+        "product_code": "SAL-002-100ML",
+        "sku": "SAL-002",
+        "size": "100 ml",
+        "name": "Salsa Chipotle Ahumado",
+        "quantity": 0,
+        "unit_price": 6.50,
+        "line_total": 13.00
+      }
+    ]
+  }
+}

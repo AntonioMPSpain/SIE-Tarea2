@@ -13,3 +13,7 @@ backoffice/storage/database/*.sqlite-shm
 Thumbs.db
 .vscode/
 .idea/
+
+
+CLAUDE.local.md
+deploy/.env

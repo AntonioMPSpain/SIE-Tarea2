@@ -1,0 +1,19 @@
+{
+  "event_id": "e7b25d14-9a3c-4b8f-b062-1d4f8a6c3e92",
+  "type": "payment.simulated",
+  "occurred_at": "2026-11-10T19:12:08+01:00",
+  "source": "piquantum-web",
+  "schema_version": "1.0",
+  "data": {
+    "order_reference": "PQ-20261110-T5N4RW",
+    "payment": {
+      "reference": "PAY-20261110-0008",
+      "method": "card",
+      "gateway": "redsys-test",
+      "status": "declined",
+      "amount": 31.40,
+      "origin": "cliente"
+    },
+    "order_status": "cancelado"
+  }
+}

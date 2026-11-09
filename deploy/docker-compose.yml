@@ -1,0 +1,106 @@
+# Despliegue de la Tarea 2 en la VM de Google Cloud (34.175.156.116).
+#
+#   Internet ──443──► caddy ──► n8n:5678         (https://n8n.piquantum.onl)
+#                         └──► backoffice:8080  (https://erp.piquantum.onl, sin /api)
+#
+# Solo Caddy publica puertos (80 y 443). n8n y el back-office se hablan por la red
+# interna de Docker: n8n llama a http://backoffice:8080/api/v1/... y el back-office
+# avisa a http://n8n:5678/webhook/...
+#
+# Los secretos se leen de deploy/.env (copia de .env.example, nunca se sube a Git).
+# Uso: ver deploy/README.md
+
+name: piquantum
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  caddy:
+    image: caddy:2.11.9
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificados de Let's Encrypt
+      - caddy_config:/config
+    depends_on:
+      - n8n
+      - backoffice
+    logging: *logging
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.46.6
+    restart: unless-stopped
+    environment:
+      N8N_HOST: n8n.piquantum.onl
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://n8n.piquantum.onl/
+      N8N_EDITOR_BASE_URL: https://n8n.piquantum.onl/
+      N8N_PROXY_HOPS: "1"                     # detrás de Caddy
+      GENERIC_TIMEZONE: Europe/Madrid
+      TZ: Europe/Madrid
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Falta N8N_ENCRYPTION_KEY en deploy/.env}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      # Correo de n8n (invitaciones y recuperar contraseñas) con una cuenta de DonDominio.
+      # El remitente es la misma cuenta con la que se autentica (SPF y DKIM del dominio).
+      N8N_EMAIL_MODE: smtp
+      N8N_SMTP_HOST: smtp.dondominio.com
+      N8N_SMTP_PORT: "465"
+      N8N_SMTP_SSL: "true"
+      N8N_SMTP_USER: ${N8N_SMTP_USER:-}
+      N8N_SMTP_PASS: ${N8N_SMTP_PASS:-}
+      N8N_SMTP_SENDER: Piquantum n8n <${N8N_SMTP_USER:-}>
+      # Code node: verificar firmas HMAC con el módulo crypto de Node
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      # El historial de ejecuciones es evidencia de la práctica: se guarda 60 días
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "1440"
+      # Los secretos se leen en los flujos con $env.NOMBRE, así no quedan dentro
+      # de los workflows exportados a n8n/workflows/ (que sí van a Git)
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      ERP_API_URL: http://backoffice:8080/api/v1
+      ERP_API_KEY: ${INTEGRATION_API_KEY:?Falta INTEGRATION_API_KEY en deploy/.env}
+      ERP_WEBHOOK_SECRET: ${WEBHOOK_HMAC_SECRET:?Falta WEBHOOK_HMAC_SECRET en deploy/.env}
+      # Tienda (Fase 1): se rellenan cuando la tienda tenga el emisor y el endpoint de sync
+      PIQUANTUM_WEBHOOK_SECRET: ${PIQUANTUM_WEBHOOK_SECRET:-}
+      PIQUANTUM_SYNC_URL: ${PIQUANTUM_SYNC_URL:-https://www.piquantum.onl/api/integration/sync}
+      PIQUANTUM_SYNC_TOKEN: ${PIQUANTUM_SYNC_TOKEN:-}
+    volumes:
+      - n8n_data:/home/node/.n8n              # usuarios, flujos, credenciales e historial
+    logging: *logging
+
+  backoffice:
+    build: ../backoffice
+    image: piquantum-backoffice:local
+    restart: unless-stopped
+    environment:
+      APP_ENV: production                     # sin botón de vaciar la BD
+      APP_URL: https://erp.piquantum.onl
+      DB_CONNECTION: sqlite
+      DB_SQLITE_PATH: storage/database/piquantum_erp.sqlite
+      INTEGRATION_API_KEY: ${INTEGRATION_API_KEY:?Falta INTEGRATION_API_KEY en deploy/.env}
+      WEBHOOK_HMAC_SECRET: ${WEBHOOK_HMAC_SECRET:?Falta WEBHOOK_HMAC_SECRET en deploy/.env}
+      ERP_ADMIN_EMAIL: ${ERP_ADMIN_EMAIL:?Falta ERP_ADMIN_EMAIL en deploy/.env}
+      ERP_ADMIN_PASSWORD_HASH: ${ERP_ADMIN_PASSWORD_HASH:?Falta ERP_ADMIN_PASSWORD_HASH en deploy/.env}
+      N8N_WEBHOOK_OPERATIONAL_CHANGE_URL: http://n8n:5678/webhook/piquantum-operational-change
+      N8N_WEBHOOK_HUMAN_REVIEW_URL: http://n8n:5678/webhook/piquantum-human-review
+      # php -S atiende una petición cada vez: si el back-office avisa a n8n y n8n le
+      # vuelve a llamar en la misma ejecución, con un solo proceso se bloquearía
+      PHP_CLI_SERVER_WORKERS: "4"
+    volumes:
+      - erp_db:/app/storage/database          # base de datos SQLite del back-office
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:
+  n8n_data:
+  erp_db:

@@ -83,7 +83,7 @@ Cada workflow en **n8n** cumplirá los elementos obligatorios del Apartado 4:
 3. **Procesamiento en n8n:**
    - **Validación:** Comprueba firma `X-Piquantum-Signature` y campos obligatorios (`order_ref`, `customer.email`, `items` no vacío, `total > 0`, `status`).
    - **Rama de Error (Demostrable):** Si se envía un payload de prueba sin `order_ref` o con importe negativo, n8n desvía la ejecución por la rama de error y registra el fallo en `erp_integration_logs` (`ERR_INVALID_PAYLOAD`).
-   - **Rama Correcta e Idempotencia:** Normaliza los estados y llama a `POST /api/v1/orders` del Back-Office. Si el `order_ref` ya existe, actualiza el estado de forma idempotente sin duplicar líneas.
+   - **Rama Correcta e Idempotencia:** Normaliza los estados y llama a `POST /api/v1/webhooks/orders` del Back-Office. Si el `order_ref` ya existe, actualiza el estado de forma idempotente sin duplicar líneas.
 4. **Resultado en Back-Office:** El pedido, el cliente y el descuento de stock de almacén quedan registrados en el Back-Office junto con el log de ejecución exitosa.
 
 ### Escenario 2: Cambio operativo o sincronización (`order.status_changed` / Stock)
