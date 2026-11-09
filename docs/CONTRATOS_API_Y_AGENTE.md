@@ -47,6 +47,16 @@ Cada petición recibida por el Back-Office se somete a validación sintáctica y
 3. Si el `event_id` es nuevo y el `order_ref` **no existe**, crea el pedido, inserta las líneas en `erp_order_items` y descuenta el stock en `erp_inventory`, todo en una transacción (`"result": "created"`).
 4. Si el `order_ref` **ya existe** (por ejemplo, `payment.simulated` después de `order.created`), el evento solo puede **hacer avanzar** el estado según la tabla de transiciones (`"result": "updated"`). Nunca lo hace retroceder: un `order.created` que llega tarde a un pedido ya `enviado` se ignora (`"result": "ignored"`). El total no se sobrescribe y el stock no se vuelve a descontar.
 
+Valores del campo `result` en la respuesta de `POST /api/v1/webhooks/orders` (todos con HTTP `200`):
+
+| `result` | Cuándo |
+|---|---|
+| `created` | Pedido nuevo: se crea, se insertan las líneas y se descuenta el stock. |
+| `updated` | El pedido ya existía y el evento hace avanzar su estado (el total no cambia). |
+| `unchanged` | El pedido ya existía y el evento trae el mismo estado que ya tenía: no se toca nada. |
+| `ignored` | El pedido ya existía y el evento haría retroceder o saltarse estados: se ignora. |
+| `duplicate` | El `event_id` ya se había procesado: no se toca nada. |
+
 En las incidencias, `event_id` es opcional; si llega repetido, la respuesta también es `duplicate`.
 
 ### 3.2. Transiciones de estado (misma tabla que `Order::TRANSITIONS` de la tienda)
@@ -72,6 +82,92 @@ El mismo estado responde `200` sin cambios. Los eventos de la tienda, además, p
 ### 3.4. Carga del catálogo desde la tienda
 
 `POST /api/v1/inventory/import` recibe `{"products": [{sku, product_name, category, variant_size, unit_price, stock_available}]}` (ejemplo: `payloads/carga_catalogo_tienda.json`) y hace alta o actualización por `sku`. Es idempotente: importar dos veces la misma lista no duplica nada. Es todo o nada: si un producto no es válido, no se guarda ninguno. Cada ejecución queda en el log (`CARGA_CATALOGO`). Códigos de producto: `SKU-TAMAÑO` sin espacios en mayúsculas (`SAL-002-100ML`), o solo el SKU si el producto no tiene tamaños (`SAL-004`).
+
+### 3.5. Estados de pedido admitidos y estado de pago
+
+El campo `status` de un pedido tiene que ser uno de estos valores; cualquier otro se rechaza con `422 ERR_CAMPOS_OBLIGATORIOS`. Se aceptan en español (como en la tienda) o en inglés, y el Back-Office los guarda así:
+
+| `status` recibido | `order_status` guardado | `payment_status` guardado |
+|---|---|---|
+| `creado`, `created` | `creado` | `pendiente_pago` |
+| `pagado_simulado`, `paid`, `pendiente_preparacion` | `pendiente_preparacion` | `pagado_simulado` |
+| `enviado`, `shipped` | `enviado` | `pagado_simulado` |
+| `incidencia` | `incidencia` | `pagado_simulado` |
+| `cancelado`, `cancelled` | `cancelado` | `cancelado` |
+
+- Un pedido pagado (`pagado_simulado`) pasa directamente a la cola de preparación del almacén (`pendiente_preparacion`).
+- Un pedido cancelado **no cuenta como pagado**: su `payment_status` es `cancelado`. Así no suma en la etapa «pagados» del embudo, igual que en la tienda, donde `Order::PAID_STATUSES` solo incluye pagado, en preparación y enviado.
+- La herramienta `consultar_pedido_e_historial_cliente` del agente devuelve estos mismos valores en `order_status` y `payment_status`.
+
+### 3.6. Formato de los avisos del Back-Office a n8n
+
+Todos los avisos van por `POST`, con este sobre y estas cabeceras:
+
+```json
+{
+  "event_id": "evt_bo_3fa85f6457174562",
+  "event_type": "order.status_changed | inventory.stock_updated | ai.proposal.approved",
+  "source": "piquantum.backoffice.erp",
+  "occurred_at": "2026-11-08T19:00:00Z",
+  "data": { }
+}
+```
+
+| Cabecera | Contenido |
+|---|---|
+| `Content-Type` | `application/json` |
+| `X-Piquantum-Event` | El `event_type` (sirve para enrutar en n8n sin leer el cuerpo). |
+| `X-Piquantum-Signature` | `sha256=<HMAC-SHA256 del cuerpo con WEBHOOK_HMAC_SECRET>` |
+| `X-Integration-Token` | El `INTEGRATION_API_KEY` del Back-Office (para que n8n pueda llamarle de vuelta). |
+
+- `event_id` es `evt_bo_` seguido de 16 caracteres hexadecimales. En cada reintento llega **el mismo cuerpo, byte a byte**: el mismo `event_id`, el mismo `occurred_at` y, por tanto, la misma firma. n8n debe usar el `event_id` para no aplicar dos veces el mismo aviso.
+- `occurred_at` va en UTC (ISO 8601). Las fechas dentro de `data` (como `reviewed_at`) van en hora de Madrid, con el formato `AAAA-MM-DD hh:mm:ss`.
+- El aviso solo se da por entregado si n8n responde **2xx** (apartado 3.3).
+
+**`order.status_changed`** (Escenario 2, a `N8N_WEBHOOK_OPERATIONAL_CHANGE_URL`): cuando el operador cambia el estado de un pedido en el Back-Office.
+
+```json
+"data": {
+  "order_ref": "PQ-20261108-A901BC",
+  "previous_status": "pendiente_preparacion",
+  "new_status": "enviado",
+  "priority": "URGENTE",
+  "customer_email": "laura@example.com",
+  "origin": "backoffice_erp"
+}
+```
+
+**`inventory.stock_updated`** (Escenario 2, a `N8N_WEBHOOK_OPERATIONAL_CHANGE_URL`): cuando el operador cambia el stock de un producto en el Back-Office. `variant_size` es `null` en los productos sin tamaños (`SAL-003` … `SAL-009`).
+
+```json
+"data": {
+  "sku": "SAL-002-100ML",
+  "product_name": "Salsa Chipotle Ahumado",
+  "variant_size": "100 ml",
+  "previous_stock": 18,
+  "new_stock": 25,
+  "origin": "backoffice_erp"
+}
+```
+
+**`ai.proposal.approved`** (Escenario 3, a `N8N_WEBHOOK_HUMAN_REVIEW_URL`): cuando un humano aprueba una propuesta del agente y la incidencia tiene `telegram_chat_id`. Sin `chat_id` no se envía ningún aviso; las propuestas rechazadas tampoco generan aviso.
+
+```json
+"data": {
+  "audit_id": 1,
+  "ticket_ref": "INC-20261108-3045",
+  "order_ref": "PQ-20261108-A901BC",
+  "approved_action": "GENERAR_ENVIO_REPOSICION_1_UD_SAL-002-100ML_Y_NOTIFICAR_TELEGRAM",
+  "customer_telegram_chat_id": "123456789",
+  "customer_message": "🌶️ Hola Laura: hemos revisado la incidencia…",
+  "reviewed_by": "operador@erp.piquantum.test",
+  "reviewed_at": "2026-11-08 19:05:12"
+}
+```
+
+- `customer_telegram_chat_id` siempre es el `chat_id` numérico (como texto; negativo si es un grupo), nunca un `@usuario`.
+- `order_ref` puede ser `null` si la incidencia no está asociada a un pedido.
+- n8n tiene que enviar `customer_message` al `chat_id` y responder 2xx **después** de enviarlo; solo entonces el Back-Office marca `telegram_notified = 1` y da la incidencia por resuelta.
 
 ---
 

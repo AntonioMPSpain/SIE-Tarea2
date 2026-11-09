@@ -43,7 +43,7 @@ Tienes **dos direcciones** ya programadas:
   Cuando entras en la pestaña **📦 Pedidos** o **🏭 Almacén** del Back-Office y cambias el estado de un pedido a `enviado` (o cambias el stock de un SKU), el Back-Office **primero guarda el cambio** y después envía un `POST` firmado con HMAC (`X-Piquantum-Signature: sha256=...`) a `N8N_WEBHOOK_OPERATIONAL_CHANGE_URL` (`http://n8n:5678/webhook/piquantum-operational-change`). Si n8n no responde 2xx, el cambio queda `PENDIENTE_SINCRONIZACION` y se reintenta con **el mismo cuerpo y el mismo `event_id`**, hasta 5 intentos; después queda `ERROR_SINCRONIZACION`. Usad el `event_id` para no aplicar dos veces el mismo aviso. Formato:
   ```json
   {
-    "event_id": "evt_bo_9f8a7b6c5d4e",
+    "event_id": "evt_bo_9f8a7b6c5d4e1a2b",
     "event_type": "order.status_changed",
     "source": "piquantum.backoffice.erp",
     "occurred_at": "2026-11-08T19:00:00Z",
@@ -57,6 +57,7 @@ Tienes **dos direcciones** ya programadas:
     }
   }
   ```
+  Formato de los otros avisos (`inventory.stock_updated` y `ai.proposal.approved`) y cabeceras (`X-Piquantum-Event`, `X-Piquantum-Signature`): ver el apartado 3.6 de `docs/CONTRATOS_API_Y_AGENTE.md`.
 - **Dirección B (De n8n hacia el Back-Office):**
   Si n8n quiere actualizar el estado de un pedido o el stock en el Back-Office, solo tiene que hacer `POST http://backoffice:8080/api/v1/webhooks/operations` usando el JSON de `payloads/escenario2_cambio_operativo.json`. Se aplican las mismas transiciones que `Order::TRANSITIONS` de la tienda: una transición no permitida (p. ej. `cancelado → enviado`) da `422 ERR_TRANSICION_ESTADO`, y el mismo estado da `200` sin cambios.
 
