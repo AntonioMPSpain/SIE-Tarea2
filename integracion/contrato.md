@@ -223,6 +223,7 @@ n8n responde siempre con un JSON corto. Si ha llamado al back-office, `result` e
 | `type` desconocido o `schema_version` no soportada | 400 | `bad_request` | No | Alerta |
 | Faltan campos, tipos incorrectos o total incoherente (validación de n8n) | 422 | `invalid` | No | Log con la lista de errores y alerta |
 | El back-office rechaza el evento (`ERR_CAMPOS_OBLIGATORIOS`, `ERR_IMPORTE_INVALIDO`, `ERR_ENTIDAD_NO_ENCONTRADA`, `ERR_STOCK_INSUFICIENTE`) | 422 | `rejected` | No | Se devuelve el `error_code` del back-office |
+| Flujo de n8n desactivado o en edición (lo responde n8n, no el flujo) | 404 | — | **Sí** | Se recupera al reactivar el flujo |
 | Back-office caído o error inesperado | 503 | `error` | **Sí** | Error Trigger + log |
 | Sin respuesta en 5 s | — | — | **Sí** | — |
 
@@ -236,7 +237,9 @@ En los 422 se devuelve la lista de errores, que la tienda guarda en `webhook_del
 { "result": "rejected", "event_id": "…", "error_code": "ERR_STOCK_INSUFICIENTE", "details": { } }
 ```
 
-**Reintentos de la tienda:** solo con 5xx, 408, 429 o sin respuesta. Después del envío inicial, **hasta 5 reintentos** con espera creciente (1, 2, 5, 10 y 30 min), es decir, 6 envíos como máximo. Después, estado `fallido`. Siempre con el mismo `event_id` y el mismo cuerpo, y con un timestamp y una firma nuevos en cada envío.
+**Reintentos de la tienda:** solo con 5xx, 404, 408, 429 o sin respuesta. El 404 es lo que responde n8n cuando el flujo está desactivado o en edición («webhook not registered»): es temporal, así que se reintenta. Después del envío inicial, **hasta 5 reintentos** con espera creciente (1, 2, 5, 10 y 30 min), es decir, 6 envíos como máximo. Después, estado `fallido`. Siempre con el mismo `event_id` y el mismo cuerpo, y con un timestamp y una firma nuevos en cada envío.
+
+**Recuperar entregas fallidas:** `php artisan integracion:reintentar --fallidos` vuelve a poner en cola las entregas `fallido` (por ejemplo, después de corregir el flujo de n8n), con el mismo `event_id` y el mismo cuerpo. Si n8n o el back-office ya las tenían, responden `duplicate` y no se duplica nada.
 
 **Orden de llegada:** no está garantizado (un reintento puede adelantar a otro evento). No hace falta esperar: cada evento de pedido lleva el pedido completo, y el back-office solo deja avanzar el estado (`ignored` si haría retroceder).
 
