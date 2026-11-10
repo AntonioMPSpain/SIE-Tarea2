@@ -236,7 +236,7 @@ En los 422 se devuelve la lista de errores, que la tienda guarda en `webhook_del
 { "result": "rejected", "event_id": "…", "error_code": "ERR_STOCK_INSUFICIENTE", "details": { } }
 ```
 
-**Reintentos de la tienda:** solo con 5xx, 408, 429 o sin respuesta. Hasta 5 intentos con espera creciente (1, 2, 5, 10 y 30 min). Después, estado `fallido`. Siempre con el mismo `event_id` y el mismo cuerpo.
+**Reintentos de la tienda:** solo con 5xx, 408, 429 o sin respuesta. Después del envío inicial, **hasta 5 reintentos** con espera creciente (1, 2, 5, 10 y 30 min), es decir, 6 envíos como máximo. Después, estado `fallido`. Siempre con el mismo `event_id` y el mismo cuerpo, y con un timestamp y una firma nuevos en cada envío.
 
 **Orden de llegada:** no está garantizado (un reintento puede adelantar a otro evento). No hace falta esperar: cada evento de pedido lleva el pedido completo, y el back-office solo deja avanzar el estado (`ignored` si haría retroceder).
 
@@ -248,7 +248,10 @@ Una sola ruta: **`POST /api/integration/sync`**. La usa el flujo del escenario 2
 - Autenticación: `Authorization: Bearer <INTEGRATION_API_TOKEN>`. Es un **token fijo** en el `.env` de la tienda, comparado en tiempo constante (`hash_equals`), sin Sanctum. Sin token, con uno incorrecto o si la tienda no tiene token configurado → 401.
 - Límite: 60 peticiones/min (`throttle`); por encima → 429.
 - Sin CSRF ni sesión (rutas `api` de Laravel).
-- **`event_id`:** n8n pasa el `event_id` del aviso del back-office (`evt_bo_…`). El back-office repite el mismo aviso en cada reintento, y la tienda usa ese identificador para no aplicar dos veces el mismo cambio. Solo se guarda cuando el cambio se ha aplicado (o ya estaba aplicado).
+- **`event_id`:** n8n pasa el `event_id` del aviso del back-office (`evt_bo_…`). El back-office repite el mismo aviso en cada reintento, y la tienda usa ese identificador para no aplicar dos veces el mismo cambio.
+  - Se guarda en la tabla `integration_inbox` (índice único) **en la misma transacción** que el cambio: si llegan dos avisos iguales a la vez, solo se aplica uno.
+  - Se guardan **todos** los avisos con un `event_id` válido, también los rechazados (404 y 422), con la respuesta que se dio. Sirven de rastro de la gestión de errores.
+  - Un `event_id` repetido **repite la respuesta original**: 200 si el cambio se aplicó, y el mismo 404 o 422 si se rechazó. Así n8n nunca da por sincronizado algo que la tienda rechazó.
 
 ### Cambio de estado de un pedido (`ORDER_STATUS`)
 
@@ -277,16 +280,16 @@ Petición ([`payloads/sync.stock.json`](payloads/sync.stock.json)):
 
 | Caso | HTTP | Cuerpo |
 |---|---|---|
-| Cambio aplicado | 200 | `{"result": "updated", "event_id": "…"}` |
-| El pedido ya tenía ese estado o el stock ya tenía ese valor | 200 | `{"result": "unchanged", "event_id": "…"}` |
-| `event_id` ya procesado | 200 | `{"result": "duplicate", "event_id": "…"}` |
-| Sin token o token incorrecto | 401 | `{"message": "Unauthenticated."}` |
-| `order_ref` o `product_code` que no existe | 404 | `{"result": "not_found", "event_id": "…"}` |
-| Faltan campos, `change_type` desconocido o `new_stock` negativo | 422 | Formato de validación de Laravel (`message` y `errors`) |
-| Transición no permitida | 422 | `{"result": "invalid_transition", "current_status": "cancelado", "allowed_next": []}` |
+| Cambio aplicado | 200 | `{"result": "updated", "event_id": "…", …}` (con `previous_status` y `status`, o `previous_stock` y `stock`) |
+| El pedido ya tenía ese estado o el stock ya tenía ese valor | 200 | `{"result": "unchanged", "event_id": "…", …}` |
+| `event_id` ya procesado | **El código original** (200, 404 o 422) | `{"result": "duplicate", "event_id": "…", "original_result": "updated", "original_response": {…}}` |
+| Sin token, token incorrecto o la tienda sin token configurado | 401 | `{"message": "Unauthenticated."}` |
+| `order_ref` o `product_code` que no existe (también un SKU con tamaños sin indicar el tamaño) | 404 | `{"result": "not_found", "event_id": "…", "message": "…"}` |
+| Faltan campos, `change_type` desconocido, estado que no existe o `new_stock` negativo | 422 | `{"result": "invalid", "event_id": "…", "message": "…", "errors": {"campo": ["…"]}}` |
+| Transición no permitida | 422 | `{"result": "invalid_transition", "event_id": "…", "current_status": "cancelado", "requested_status": "enviado", "allowed_next": []}` |
 | Demasiadas peticiones | 429 | — |
 
-**Qué hace n8n con la respuesta:** responde 2xx al back-office **solo si la tienda respondió 200** (`updated`, `unchanged` o `duplicate`). En cualquier otro caso responde con error, y el back-office reintenta y, tras 5 intentos, marca la entidad como `ERROR_SINCRONIZACION` para que el operario lo vea.
+**Qué hace n8n con la respuesta:** responde 2xx al back-office **solo si la tienda respondió 200** (`updated`, `unchanged`, o `duplicate` de un cambio que se aplicó). En cualquier otro caso responde con error, y el back-office reintenta y, tras 5 intentos, marca la entidad como `ERROR_SINCRONIZACION` para que el operario lo vea.
 
 ## 9. Correspondencia con la API del back-office
 
@@ -375,7 +378,8 @@ Estados (apartado 3.5 del contrato del back-office):
 | 7 | La tienda no ofrece endpoints de consulta | El agente usa las herramientas del back-office. `GET /api/catalogo` queda opcional, solo si hace falta cargar en el back-office el stock real actual de la tienda |
 | 8 | Autenticación de la API de la tienda | Token fijo (`INTEGRATION_API_TOKEN`) con `hash_equals`, sin Sanctum (apartado 8) |
 | 9 | Timestamp en la firma y ventana de 5 min | Sí (apartado 3) |
-| 10 | Reintentos de la tienda | 5 intentos: 1, 2, 5, 10 y 30 min (apartado 7) |
+| 10 | Reintentos de la tienda | Envío inicial + 5 reintentos: 1, 2, 5, 10 y 30 min (apartado 7) |
+| 11 | Idempotencia de `POST /api/integration/sync` | El `event_id` se guarda en la misma transacción que el cambio; se guardan también los rechazos, y un duplicado repite la respuesta original (apartado 8) |
 
 ### Abiertas
 
@@ -439,7 +443,8 @@ curl -i -X POST https://www.piquantum.onl/api/integration/sync \
 |---|---|
 | Sin `Authorization` o con un token incorrecto | 401 |
 | `sync.estado.json` con el pedido en `pendiente_preparacion` | 200 `updated`; correo de «pedido en camino»; ningún `order.status_changed` hacia n8n |
-| `sync.estado.json` otra vez | 200 `duplicate` |
+| `sync.estado.json` otra vez | 200 `duplicate`, sin segundo correo |
+| Un aviso rechazado (404 o 422), otra vez | El mismo 404 o 422, con `result: "duplicate"` y `original_result` |
 | El mismo cambio con otro `event_id` | 200 `unchanged` |
 | `new_status: "enviado"` con el pedido `cancelado` | 422 `invalid_transition` con `allowed_next: []` |
 | `sync.stock.json` | 200 `updated`: `SAL-002-100ML` con stock 25 en la tienda |
