@@ -100,7 +100,8 @@ class Database
             } else {
                 // Ruta relativa a backoffice/ o absoluta (las pruebas usan un archivo temporal propio)
                 $sqlitePath = (string) self::env('DB_SQLITE_PATH', 'storage/database/piquantum_erp.sqlite');
-                $fullPath = str_starts_with($sqlitePath, '/') ? $sqlitePath : $baseDir . '/' . ltrim($sqlitePath, '/\\');
+                $isAbsolute = str_starts_with($sqlitePath, '/') || (bool) preg_match('/^[A-Za-z]:[\/\\\\]/', $sqlitePath);
+                $fullPath = $isAbsolute ? $sqlitePath : $baseDir . '/' . ltrim($sqlitePath, '/\\');
                 $dir = dirname($fullPath);
                 if (!is_dir($dir)) {
                     mkdir($dir, 0775, true);
