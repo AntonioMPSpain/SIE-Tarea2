@@ -77,14 +77,26 @@ class WebController
             return;
         }
 
+        // Exportaciones directas de auditoría, trazabilidad y métricas (sesión autenticada)
+        if ($method === 'GET' && isset($_GET['export'])) {
+            $this->handleExport((string) $_GET['export']);
+            return;
+        }
+
         $tab = (string) ($_GET['tab'] ?? 'dashboard');
+        $searchFilter         = isset($_GET['q']) ? trim((string) $_GET['q']) : null;
+        $orderStatusFilter    = isset($_GET['order_status']) ? trim((string) $_GET['order_status']) : null;
+        $orderPriorityFilter  = isset($_GET['order_priority']) ? trim((string) $_GET['order_priority']) : null;
+        $customerSegFilter    = isset($_GET['customer_segment']) ? trim((string) $_GET['customer_segment']) : null;
+        $logStatusFilter      = isset($_GET['log_status']) ? trim((string) $_GET['log_status']) : null;
+        $logScenarioFilter    = isset($_GET['log_scenario']) ? trim((string) $_GET['log_scenario']) : null;
         $flash = $_SESSION['flash'] ?? null;
         unset($_SESSION['flash']);
 
         $metrics = $this->service->getDashboardMetrics();
 
         // Consultas para las vistas
-        $orders = $this->db->query('SELECT * FROM erp_orders ORDER BY id DESC')->fetchAll();
+        $orders = $this->service->getFilteredOrders($orderStatusFilter, $orderPriorityFilter, $searchFilter);
         $orderItemsByOrder = [];
         $allItems = $this->db->query('SELECT * FROM erp_order_items ORDER BY id ASC')->fetchAll();
         foreach ($allItems as $it) {
@@ -92,16 +104,53 @@ class WebController
         }
 
         $inventory = $this->db->query('SELECT * FROM erp_inventory ORDER BY sku ASC')->fetchAll();
-        $customers = $this->db->query('SELECT * FROM erp_customers ORDER BY total_spent DESC')->fetchAll();
+        $customers = $this->service->getCustomersWithTicketCounts($customerSegFilter, $searchFilter);
         $tickets   = $this->db->query('SELECT * FROM erp_tickets ORDER BY id DESC')->fetchAll();
         $audits    = $this->db->query('SELECT * FROM erp_ai_audits ORDER BY id DESC')->fetchAll();
-        $logs      = $this->db->query('SELECT * FROM erp_integration_logs ORDER BY id DESC LIMIT 50')->fetchAll();
+        $logs      = $this->service->getFilteredLogs($logStatusFilter, $logScenarioFilter, $searchFilter, 100);
 
         $currentUser = $this->currentUser();
         $csrfToken   = $this->csrfToken();
         $isLocalEnv  = $this->isLocalEnv();
 
         require dirname(__DIR__, 2) . '/views/layout.php';
+    }
+
+    private function handleExport(string $exportType): void
+    {
+        $logStatus   = isset($_GET['log_status']) ? trim((string) $_GET['log_status']) : null;
+        $logScenario = isset($_GET['log_scenario']) ? trim((string) $_GET['log_scenario']) : null;
+        $search      = isset($_GET['q']) ? trim((string) $_GET['q']) : null;
+
+        switch ($exportType) {
+            case 'logs_csv':
+                header('Content-Type: text/csv; charset=utf-8');
+                header('Content-Disposition: attachment; filename="piquantum_logs_trazabilidad.csv"');
+                echo $this->service->exportLogsToCsv($logStatus, $logScenario);
+                exit;
+
+            case 'logs_json':
+                header('Content-Type: application/json; charset=utf-8');
+                header('Content-Disposition: attachment; filename="piquantum_logs_trazabilidad.json"');
+                $rows = $this->service->getFilteredLogs($logStatus, $logScenario, $search, 500);
+                echo json_encode(['status' => 'ok', 'count' => count($rows), 'logs' => $rows], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                exit;
+
+            case 'audits_csv':
+                header('Content-Type: text/csv; charset=utf-8');
+                header('Content-Disposition: attachment; filename="piquantum_auditoria_agente_ia.csv"');
+                echo $this->service->exportAuditsToCsv();
+                exit;
+
+            case 'metrics_json':
+                header('Content-Type: application/json; charset=utf-8');
+                header('Content-Disposition: attachment; filename="piquantum_metricas_operativas.json"');
+                echo json_encode(['status' => 'ok', 'metrics' => $this->service->getDashboardMetrics()], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                exit;
+
+            default:
+                $this->redirect('/');
+        }
     }
 
     private function handlePostAction(string $action): void
