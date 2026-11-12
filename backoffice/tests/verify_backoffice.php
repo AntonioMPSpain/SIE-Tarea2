@@ -23,7 +23,7 @@ putenv('N8N_WEBHOOK_HUMAN_REVIEW_URL=http://127.0.0.1:9/n8n-apagado');
 register_shutdown_function(static function () use ($testDb): void {
     foreach ([$testDb, "{$testDb}-journal", "{$testDb}-wal", "{$testDb}-shm"] as $file) {
         if (file_exists($file)) {
-            unlink($file);
+            @unlink($file);
         }
     }
 });
@@ -270,7 +270,8 @@ check(scalar($db, 'SELECT sync_status FROM erp_inventory WHERE sku = ?', ['SAL-0
 $fakeLog = sys_get_temp_dir() . '/pq_fake_n8n_' . bin2hex(random_bytes(4)) . '.log';
 $fakePort = random_int(20000, 40000);
 $fakeEnv = array_merge(getenv(), ['FAKE_N8N_LOG' => $fakeLog]);
-$fake = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$fakePort}", __DIR__ . '/fixtures/fake_n8n.php'], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes, null, $fakeEnv);
+$nullDev = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+$fake = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$fakePort}", __DIR__ . '/fixtures/fake_n8n.php'], [1 => ['file', $nullDev, 'w'], 2 => ['file', $nullDev, 'w']], $pipes, null, $fakeEnv);
 for ($i = 0; $i < 50 && @fsockopen('127.0.0.1', $fakePort) === false; $i++) {
     usleep(100000);
 }
@@ -312,6 +313,24 @@ $badImport = ['products' => [['sku' => 'SAL-011', 'product_name' => 'X', 'catego
 $res = $service->importInventory($badImport);
 check($res['ok'] === false && (int) scalar($db, 'SELECT COUNT(*) FROM erp_inventory WHERE sku = ?', ['SAL-011']) === 0, 'C15: si un producto no es válido no se guarda ninguno', $res['message'] ?? '');
 check((int) scalar($db, "SELECT COUNT(*) FROM erp_integration_logs WHERE scenario = 'CARGA_CATALOGO'") === 3, 'C15: cada ejecución queda en el log');
+
+// --- C16: Filtros operativos, Ficha de Clientes CRM y Exportación CSV de Auditoría/Logs ---------------
+$filteredSent = $service->getFilteredOrders('enviado', null, null);
+check(count($filteredSent) >= 1 && $filteredSent[0]['order_status'] === 'enviado', 'C16: filtro de pedidos por estado operativo (enviado)');
+$filteredSearch = $service->getFilteredOrders(null, null, 'PQ-20261108-A901BC');
+check(count($filteredSearch) === 1 && $filteredSearch[0]['order_ref'] === 'PQ-20261108-A901BC', 'C16: buscador de pedidos por referencia única');
+
+$customersWithTickets = $service->getCustomersWithTicketCounts(null, 'laura@example.com');
+check(count($customersWithTickets) === 1 && (int) $customersWithTickets[0]['tickets_count'] >= 1, 'C16: ficha de clientes sincronizados (erp_customers) incluye recuento de incidencias postventa');
+
+$errorLogs = $service->getFilteredLogs('ERROR', null, null, 100);
+check(count($errorLogs) >= 5 && $errorLogs[0]['status'] === 'ERROR', 'C16: filtro de logs de trazabilidad por resultado ERROR');
+
+$csvLogs = $service->exportLogsToCsv('ERROR', null);
+check(str_starts_with($csvLogs, "\xEF\xBB\xBFid;execution_id;scenario;") && str_contains($csvLogs, ';ERROR;'), 'C16: exportación de logs de trazabilidad a CSV con BOM UTF-8');
+
+$csvAudits = $service->exportAuditsToCsv();
+check(str_starts_with($csvAudits, "\xEF\xBB\xBFaudit_id;ticket_ref;order_ref;") && str_contains($csvAudits, 'INC-20261108-3045'), 'C16: exportación de auditoría del Agente IA a CSV');
 
 // --- Resumen ------------------------------------------------------------------------------------------
 echo "\n-----------------------------------------------------------------\n";
