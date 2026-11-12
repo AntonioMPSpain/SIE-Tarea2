@@ -1,0 +1,334 @@
+{
+  "name": "Piquantum - Sincronización inicial (manual)",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "id": "8eccd98d-09ee-4354-bc20-5aec81af9d35",
+      "name": "Ejecutar sincronización"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.PIQUANTUM_SYNC_URL.replace(/\\/sync$/, '/pedidos') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.PIQUANTUM_SYNC_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        220,
+        200
+      ],
+      "id": "728ffcb7-b58b-4d88-b635-574e63b46363",
+      "name": "Tienda: pedidos"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.PIQUANTUM_SYNC_URL.replace(/\\/sync$/, '/catalogo') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.PIQUANTUM_SYNC_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        440,
+        200
+      ],
+      "id": "61de33ba-1410-4618-8a98-23049961a56f",
+      "name": "Tienda: catálogo"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sincronización inicial tienda → back-office · Stock «de antes de los pedidos».\n// El back-office descuenta stock al recibir cada pedido, y el stock de la tienda YA tiene descontados\n// esos pedidos. Por eso se carga primero stock + unidades de los pedidos (así ningún pedido se rechaza\n// por falta de stock) y, al final, el stock real de la tienda.\nconst orders = $('Tienda: pedidos').first().json.orders;\nconst catalog = $('Tienda: catálogo').first().json.products;\nconst exec = 'n8n_sync_' + $execution.id;\n\nconst units = {};\nfor (const o of orders) {\n  for (const l of o.data.lines) units[l.product_code] = (units[l.product_code] || 0) + l.quantity;\n}\nconst known = new Set(catalog.map(p => p.sku));\n\nreturn [{ json: {\n  orders_count: orders.length,\n  unknown_skus: Object.keys(units).filter(sku => !known.has(sku)),\n  import_pre: { execution_id: exec + '_stock_previo', products: catalog.map(p => ({ ...p, stock_available: p.stock_available + (units[p.sku] || 0) })) },\n  import_final: { execution_id: exec + '_stock_real', products: catalog },\n} }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "id": "62a74319-7a11-424b-b77c-a0203e551d87",
+      "name": "Preparar carga"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ERP_API_URL }}/inventory/import",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Integration-Token",
+              "value": "={{ $env.ERP_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.import_pre) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        880,
+        200
+      ],
+      "id": "7722f395-cd7b-4305-ab78-6cea60244303",
+      "name": "Back-office: stock previo"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Un item por pedido, en el formato de POST /api/v1/webhooks/orders (misma tabla que el escenario 1).\n// event_id fijo por pedido («sync-PQ-…»): si el flujo se ejecuta otra vez, el back-office responde «duplicate».\n// occurred_at = fecha real del pedido, para que el histórico por día del cuadro de mando sea correcto.\nconst orders = $('Tienda: pedidos').first().json.orders;\nconst exec = 'n8n_sync_' + $execution.id;\n\nreturn orders.map(o => {\n  const d = o.data;\n  const ord = d.order;\n  const a = d.shipping_address;\n  return { json: { reference: o.reference, payload: {\n    event_id: 'sync-' + o.reference,\n    execution_id: exec,\n    event_type: 'order.synced',\n    occurred_at: o.created_at,\n    order_ref: ord.reference,\n    status: ord.status,                        // estado actual del pedido (enviado, cancelado…)\n    payment_method: o.payment_method,          // redsys_sandbox, transferencia_simulada o null\n    shipping_address: `${a.address}, ${a.postal_code} ${a.city} (${a.country})`,\n    customer: { name: d.customer.name, email: d.customer.email },\n    items: d.lines.map(l => ({\n      sku: l.product_code,\n      product_name: l.name,\n      variant_size: l.size,\n      quantity: l.quantity,\n      unit_price: l.unit_price,\n    })),\n    discount_code: ord.discount_code,\n    discount_amount: ord.discount,\n    shipping_amount: ord.shipping,\n    total_amount: ord.total,\n  } } };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ],
+      "id": "8637ad49-f75d-4dea-a596-2bec19f9b64c",
+      "name": "Pedidos uno a uno"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ERP_API_URL }}/webhooks/orders",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Integration-Token",
+              "value": "={{ $env.ERP_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 200
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1320,
+        200
+      ],
+      "id": "272faf8e-4317-4497-80d1-e9e450a4761c",
+      "name": "Back-office: pedido",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resultado de cada pedido (la salida del HTTP va en el mismo orden que los pedidos enviados)\nconst sent = $('Pedidos uno a uno').all();\nconst results = $input.all().map((it, i) => ({\n  reference: sent[i]?.json.reference ?? null,\n  http: it.json.statusCode ?? null,\n  result: it.json.body?.result ?? null,\n  error_code: it.json.body?.error_code ?? (it.json.error ? 'SIN_RESPUESTA' : null),\n  message: it.json.body?.message ?? it.json.error?.message ?? null,\n}));\nconst byResult = {};\nfor (const r of results) {\n  const k = r.result || r.error_code || 'error';\n  byResult[k] = (byResult[k] || 0) + 1;\n}\nreturn [{ json: { pedidos: results.length, por_resultado: byResult, rechazados: results.filter(r => r.http !== 200) } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        200
+      ],
+      "id": "32c6623a-c1ff-4f06-814c-fa694d985a83",
+      "name": "Resumen de pedidos"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ERP_API_URL }}/inventory/import",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Integration-Token",
+              "value": "={{ $env.ERP_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Preparar carga').first().json.import_final) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1760,
+        200
+      ],
+      "id": "4f515fa5-06a7-472f-98c4-1bc43f245846",
+      "name": "Back-office: stock real"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resumen de la sincronización\nconst prep = $('Preparar carga').first().json;\nconst resumen = $('Resumen de pedidos').first().json;\nconst pre = $('Back-office: stock previo').first().json;\nconst fin = $input.first().json;\n\nreturn [{ json: {\n  pedidos_enviados: resumen.pedidos,\n  pedidos_por_resultado: resumen.por_resultado,\n  pedidos_rechazados: resumen.rechazados,\n  skus_de_pedidos_que_no_estan_en_el_catalogo: prep.unknown_skus,\n  stock_previo: pre.message,\n  stock_real: fin.message,\n  stock_cuadrado_con_la_tienda: fin.ok === true,\n  nota: fin.updated === 0\n    ? 'Tras cargar los pedidos, el stock del back-office ya coincidía con el de la tienda.'\n    : `Se corrigieron ${fin.updated} referencias (pedidos ignorados o rechazados): ahora coinciden con la tienda.`,\n} }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        200
+      ],
+      "id": "3cebd3f3-51cb-4e08-85e6-720d6bd24726",
+      "name": "Resultado"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Ejecutar sincronización": {
+      "main": [
+        [
+          {
+            "node": "Tienda: pedidos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tienda: pedidos": {
+      "main": [
+        [
+          {
+            "node": "Tienda: catálogo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tienda: catálogo": {
+      "main": [
+        [
+          {
+            "node": "Preparar carga",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar carga": {
+      "main": [
+        [
+          {
+            "node": "Back-office: stock previo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Back-office: stock previo": {
+      "main": [
+        [
+          {
+            "node": "Pedidos uno a uno",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedidos uno a uno": {
+      "main": [
+        [
+          {
+            "node": "Back-office: pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Back-office: pedido": {
+      "main": [
+        [
+          {
+            "node": "Resumen de pedidos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resumen de pedidos": {
+      "main": [
+        [
+          {
+            "node": "Back-office: stock real",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Back-office: stock real": {
+      "main": [
+        [
+          {
+            "node": "Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "tags": []
+}

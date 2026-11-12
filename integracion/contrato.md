@@ -15,6 +15,7 @@ Cualquier cambio se hace por pull request aprobado por los tres y sube `schema_v
 |---|---|---|
 | Tienda → n8n → back-office | Eventos de negocio (`order.created`, `payment.simulated`, `order.status_changed`, `support.requested`) | Webhook HTTPS firmado (push) hacia n8n; n8n llama a la API del back-office |
 | Back-office → n8n → tienda | Cambios de estado de pedidos y de stock hechos por el operario en el back-office | Aviso firmado del back-office a n8n; n8n llama a `POST /api/integration/sync` de la tienda con token |
+| Tienda → n8n → back-office (carga inicial, manual) | Catálogo, stock y pedidos históricos, para que los dos sistemas partan de los mismos datos | Flujo manual de n8n: lee `GET /api/integration/catalogo` y `/pedidos` de la tienda (token) y llama a `/inventory/import` y `/webhooks/orders` del back-office (apartado 8.1) |
 
 Los eventos `product.viewed`, `cart.item_added`, `cart.item_updated`, `cart.item_removed`, `checkout.started` e `invoice.issued` **no se envían**: no crean nada en el back-office y se quedan en el registro de eventos de la tienda.
 
@@ -245,7 +246,9 @@ En los 422 se devuelve la lista de errores, que la tienda guarda en `webhook_del
 
 ## 8. API de la tienda para n8n
 
-Una sola ruta: **`POST /api/integration/sync`**. La usa el flujo del escenario 2 para aplicar en la tienda los cambios que el operario hace en el back-office.
+Tres rutas, todas con el mismo token:
+- **`POST /api/integration/sync`**: la usa el flujo del escenario 2 para aplicar en la tienda los cambios que el operario hace en el back-office.
+- **`GET /api/integration/catalogo`** y **`GET /api/integration/pedidos`**: solo lectura, para la carga inicial (apartado 8.1).
 
 - Base: `https://www.piquantum.onl/api`.
 - Autenticación: `Authorization: Bearer <INTEGRATION_API_TOKEN>`. Es un **token fijo** en el `.env` de la tienda, comparado en tiempo constante (`hash_equals`), sin Sanctum. Sin token, con uno incorrecto o si la tienda no tiene token configurado → 401.
@@ -293,6 +296,45 @@ Petición ([`payloads/sync.stock.json`](payloads/sync.stock.json)):
 | Demasiadas peticiones | 429 | — |
 
 **Qué hace n8n con la respuesta:** responde 2xx al back-office **solo si la tienda respondió 200** (`updated`, `unchanged`, o `duplicate` de un cambio que se aplicó). En cualquier otro caso responde con error, y el back-office reintenta y, tras 5 intentos, marca la entidad como `ERROR_SINCRONIZACION` para que el operario lo vea.
+
+### 8.1 Carga inicial (sincronización completa tienda → back-office)
+
+Para que el back-office parta de los mismos datos que la tienda, el flujo manual de n8n «Piquantum - Sincronización inicial» (`n8n/workflows/sincronizacion_inicial.json`) los carga **por la misma API de integración**, no por la base de datos. Así el back-office aplica sus propias reglas (estado de pago, prioridad, segmento del cliente) y cada pedido queda en sus logs de trazabilidad.
+
+**Qué sistema manda:** la tienda. Es la que crea el catálogo, registra todas las ventas y genera los pedidos. Después de la carga, cada sistema mantiene su parte: las ventas llegan al back-office por el escenario 1 y los ajustes del almacén llegan a la tienda por el escenario 2.
+
+**`GET /api/integration/catalogo`** devuelve el catálogo ya en el formato de `POST /api/v1/inventory/import`, con una fila por tamaño o por producto sin tamaños:
+
+```json
+{ "count": 13, "products": [
+  { "sku": "SAL-002-100ML", "product_name": "Salsa Chipotle Ahumado", "category": "suaves", "variant_size": "100 ml", "unit_price": 6.5, "stock_available": 17 },
+  { "sku": "SAL-004", "product_name": "Sriracha Artesana", "category": "picantes", "variant_size": null, "unit_price": 7.2, "stock_available": 68 }
+] }
+```
+
+**`GET /api/integration/pedidos`** devuelve todos los pedidos, del más antiguo al más reciente, con la misma «foto» que los eventos (apartado 6.1), su fecha real y cómo se pagaron (`redsys_sandbox`, `transferencia_simulada` o `null`):
+
+```json
+{ "count": 12, "orders": [
+  { "reference": "PQ-20261016-FM0QTR", "created_at": "2026-10-16T12:12:15+02:00", "payment_method": "transferencia_simulada",
+    "data": { "order": { … }, "customer": { … }, "shipping_address": { … }, "lines": [ … ] } }
+] }
+```
+
+**Qué hace el flujo:**
+1. Lee los pedidos y el catálogo de la tienda.
+2. Carga en el back-office un **stock previo** = stock de la tienda + unidades de los pedidos que va a cargar. El back-office descuenta stock con cada pedido que recibe, y el de la tienda ya los tiene descontados. Sin este paso, el stock bajaría dos veces y algunos pedidos se rechazarían por falta de stock (`ERR_STOCK_INSUFICIENTE`).
+3. Envía cada pedido a `POST /api/v1/webhooks/orders`, uno a uno, con:
+   - `event_id` fijo `sync-<referencia>`: ejecutar el flujo otra vez da `duplicate`, y no duplica nada;
+   - `event_type: "order.synced"`, para distinguirlos en la trazabilidad de los del escenario 1;
+   - `occurred_at` = fecha real del pedido, para que el histórico por día del cuadro de mando sea correcto;
+   - el **estado actual** del pedido (`enviado`, `cancelado`…).
+4. Carga el **stock real** de la tienda. Si todo ha ido bien, sale «0 actualizados»; si algún pedido se rechazó o se ignoró, esta carga deja igualmente el stock como en la tienda.
+5. Muestra un resumen: pedidos por resultado, pedidos rechazados con su error y si el stock ha quedado cuadrado.
+
+**No incluye** las incidencias de soporte antiguas: dependen de la decisión abierta B (escenario 3).
+
+**Resultado (12-nov-2026, con el back-office vacío):** 12 pedidos → 12 `created`, 0 rechazados; stock real: 0 actualizados y 13 sin cambios.
 
 ## 9. Correspondencia con la API del back-office
 
@@ -368,7 +410,7 @@ Estados (apartado 3.5 del contrato del back-office):
 
 ## 12. Decisiones
 
-### Tomadas (Abel, 9 y 10-nov-2026; pendientes del visto bueno del grupo)
+### Tomadas (Abel, 9 a 12-nov-2026; pendientes del visto bueno del grupo)
 
 | # | Decisión | Detalle |
 |---|---|---|
@@ -378,11 +420,12 @@ Estados (apartado 3.5 del contrato del back-office):
 | 4 | Los eventos de pedido llevan el pedido completo | `order.created`, `payment.simulated` y `order.status_changed`, porque `/webhooks/orders` lo exige (apartado 6) |
 | 5 | Qué `order.status_changed` se envían | Lista blanca: solo el origen `backoffice` (panel de la tienda) (apartado 6.3) |
 | 6 | Endpoint de vuelta | Solo `POST /api/integration/sync`, con `change_type` `ORDER_STATUS` o `STOCK`; stock en valor absoluto (apartado 8) |
-| 7 | La tienda no ofrece endpoints de consulta | El agente usa las herramientas del back-office. `GET /api/catalogo` queda opcional, solo si hace falta cargar en el back-office el stock real actual de la tienda |
+| 7 | La tienda no ofrece endpoints de consulta para el agente | El agente usa las herramientas del back-office. **Revisada el 12-nov:** sí hay dos endpoints de **solo lectura** para la carga inicial, `GET /api/integration/catalogo` y `/pedidos`, con el mismo token (apartado 8.1) |
 | 8 | Autenticación de la API de la tienda | Token fijo (`INTEGRATION_API_TOKEN`) con `hash_equals`, sin Sanctum (apartado 8) |
 | 9 | Timestamp en la firma y ventana de 5 min | Sí (apartado 3) |
 | 10 | Reintentos de la tienda | Envío inicial + 5 reintentos: 1, 2, 5, 10 y 30 min (apartado 7) |
 | 11 | Idempotencia de `POST /api/integration/sync` | El `event_id` se guarda en la misma transacción que el cambio; se guardan también los rechazos, y un duplicado repite la respuesta original (apartado 8) |
+| 12 | Carga inicial de los datos de la tienda en el back-office | Manda la tienda. Catálogo, stock y pedidos históricos **por la API de integración** (flujo manual de n8n), no por SQL directo entre las dos bases de datos: el back-office aplica sus propias reglas y quedan trazabilidad e idempotencia (apartado 8.1) |
 
 ### Abiertas
 
