@@ -251,7 +251,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ result: 'rejected', event_id: $('Transformar').first().json.event_id, error_code: $json.body.error_code, details: $json.body }) ",
+        "responseBody": "={{ JSON.stringify({ result: 'rejected', event_id: $('Transformar').first().json.event_id, error_code: $json.body.error_code, details: $json.body }) }}",
         "options": {
           "responseCode": 422
         }
@@ -268,7 +268,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ result: 'error', event_id: $('Transformar').first().json.event_id, message: 'Back-office no disponible: la tienda lo reintentará' }) ",
+        "responseBody": "={{ JSON.stringify({ result: 'error', event_id: $('Transformar').first().json.event_id, message: 'Back-office no disponible: la tienda lo reintentará' }) }}",
         "options": {
           "responseCode": 503
         }
@@ -468,7 +468,7 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "bd5f8509-1726-4194-b9a9-96001193b336",
+  "versionId": "c645e364-869f-4f00-a0bb-50b7edc3ad43",
   "meta": {
     "instanceId": "35adcd1f52ceb99fb3ea98dded8a7f68574684a7f8accd9c2933c5af3828c7ce"
   },
