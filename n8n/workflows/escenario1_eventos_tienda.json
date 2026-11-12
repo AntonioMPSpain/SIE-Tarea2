@@ -1,0 +1,478 @@
+{
+  "name": "Piquantum - Eventos de tienda",
+  "nodes": [
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"result\": \"bad_request\", \"event_id\": $json.event?.event_id ?? null, \"message\": \"type o schema_version no soportados\" } }}\n",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -2160,
+        -400
+      ],
+      "id": "a261df87-9921-4b64-ac40-fb54bc25528e",
+      "name": "400"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"result\": \"error\", \"event_id\": $json.event.event_id, \"message\": \"Flujo de incidencias pendiente (escenario 3): la tienda lo reintentará\" } }}\n",
+        "options": {
+          "responseCode": 503
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -2160,
+        -544
+      ],
+      "id": "6b6cdef7-c52a-4586-b098-a643a2cf6525",
+      "name": "503"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "piquantum/eventos",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -2496,
+        -896
+      ],
+      "id": "f33959e9-6f2e-4e68-869f-b3ed2491bbc7",
+      "name": "Entrada webhook",
+      "webhookId": "5fa879b3-c45d-43bb-bd23-0ab88a6d2418"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verifica la firma HMAC de la tienda (contrato, apartado 3):\n// sha256=HMAC(secreto, timestamp + \".\" + cuerpo_exacto), con 5 minutos de margen.\nconst crypto = require('crypto');\n\nconst item = $input.first();\nconst headers = item.json.headers;\nconst secret = $env.PIQUANTUM_WEBHOOK_SECRET || '';\n\n// El cuerpo EXACTO que llegó (Raw Body). Si se usara item.json.body, n8n lo habría\n// vuelto a serializar y la firma ya no coincidiría.\nconst raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\n\nconst timestamp = headers['x-piquantum-timestamp'] || '';\nconst received = headers['x-piquantum-signature'] || '';\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(timestamp + '.' + raw).digest('hex');\n\n// Comparación en tiempo constante (como hash_equals en PHP)\nconst signatureOk = received.length === expected.length\n  && crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected));\nconst age = Math.abs(Date.now() / 1000 - Number(timestamp));\nconst timeOk = Number.isFinite(age) && age <= 300;\n\nlet reason = null;\nif (!secret) reason = 'n8n sin PIQUANTUM_WEBHOOK_SECRET';\nelse if (!signatureOk) reason = 'firma incorrecta';\nelse if (!timeOk) reason = 'timestamp fuera de la ventana de 5 minutos';\n\nlet event = null;\ntry { event = JSON.parse(raw); } catch (e) { reason = reason || 'cuerpo que no es JSON'; }\n\nreturn [{ json: { valid: reason === null, reason, event } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2288,
+        -896
+      ],
+      "id": "54784423-1b4b-4b72-9f49-772fb1715f44",
+      "name": "Verificamos firma"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "3d105de0-0c9a-4049-affc-517ac11b0abc",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        -2096,
+        -880
+      ],
+      "id": "b3e17719-59ff-47b3-ab8b-f4017537ded9",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"result\": \"unauthorized\", \"event_id\": $json.event?.event_id ?? null, \"message\": $json.reason } }}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -1856,
+        -928
+      ],
+      "id": "ffb3c084-b432-4c36-b65c-f8cca959d1fd",
+      "name": "Firma incorrecta"
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 3,
+        "output": "={{ !String($json.event.schema_version).startsWith('1.') ? 2 : ['order.created','payment.simulated','order.status_changed'].includes($json.event.type) ? 0 : $json.event.type === 'support.requested' ? 1 : 2 }}\n"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.5,
+      "position": [
+        -2480,
+        -560
+      ],
+      "id": "b0bcafe1-004f-44ad-9521-e97e16ebffdd",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validación de los eventos de pedido (contrato, apartados 4 a 6). Devuelve la lista de errores.\nconst ev = $input.first().json.event;\nconst d = ev.data || {};\nconst o = d.order || {};\nconst c = d.customer || {};\nconst a = d.shipping_address || {};\nconst lines = Array.isArray(d.lines) ? d.lines : [];\nconst errors = [];\n\nconst isNum = v => typeof v === 'number' && Number.isFinite(v);\nconst filled = v => typeof v === 'string' && v.trim() !== '';\nconst near = (x, y) => Math.abs(x - y) <= 0.01;\nconst money = v => v.toFixed(2);\nconst STATUSES = ['creado', 'pagado_simulado', 'pendiente_preparacion', 'enviado', 'cancelado', 'incidencia'];\n\n// Sobre\nif (!filled(ev.event_id)) errors.push('event_id: obligatorio');\nif (!filled(ev.occurred_at) || isNaN(Date.parse(ev.occurred_at))) errors.push('occurred_at: fecha ISO 8601 obligatoria');\nif (ev.source !== 'piquantum-web') errors.push('source: debe ser piquantum-web');\n\n// Pedido\nif (!/^PQ-\\d{8}-[A-Z0-9]{6}$/.test(o.reference || '')) errors.push('data.order.reference: formato PQ-AAAAMMDD-XXXXXX');\nif (!STATUSES.includes(o.status)) errors.push('data.order.status: estado desconocido');\nif (ev.type === 'order.created' && o.status !== 'creado') errors.push('data.order.status: en order.created debe ser creado');\nfor (const k of ['subtotal', 'discount', 'shipping', 'total']) {\n  if (!isNum(o[k])) errors.push(`data.order.${k}: número obligatorio`);\n}\nif (isNum(o.discount) && o.discount < 0) errors.push('data.order.discount: debe ser ≥ 0');\nif (isNum(o.shipping) && o.shipping < 0) errors.push('data.order.shipping: debe ser ≥ 0');\nif (filled(o.discount_code) && !(o.discount > 0)) errors.push('data.order.discount: obligatorio si hay discount_code');\n\n// Cliente y dirección\nif (!filled(c.name)) errors.push('data.customer.name: obligatorio');\nif (!filled(c.email)) errors.push('data.customer.email: obligatorio');\nelse if (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(c.email)) errors.push('data.customer.email: formato no válido');\nfor (const k of ['name', 'address', 'city', 'country']) {\n  if (!filled(a[k])) errors.push(`data.shipping_address.${k}: obligatorio`);\n}\nif (!/^\\d{5}$/.test(a.postal_code || '')) errors.push('data.shipping_address.postal_code: 5 dígitos');\n\n// Líneas\nif (lines.length === 0) errors.push('data.lines: al menos 1 línea');\nlines.forEach((l, i) => {\n  const p = `data.lines[${i}]`;\n  if (!filled(l.product_code)) errors.push(`${p}.product_code: obligatorio`);\n  if (!Number.isInteger(l.quantity) || l.quantity < 1) errors.push(`${p}.quantity: debe ser ≥ 1`);\n  if (!isNum(l.unit_price) || l.unit_price <= 0) errors.push(`${p}.unit_price: debe ser > 0`);\n  if (!isNum(l.line_total) || !isNum(l.quantity) || !isNum(l.unit_price) || !near(l.quantity * l.unit_price, l.line_total)) {\n    errors.push(`${p}.line_total: no coincide con quantity × unit_price`);\n  }\n});\n\n// Totales\nconst sumLines = lines.reduce((s, l) => s + (isNum(l.line_total) ? l.line_total : 0), 0);\nif (isNum(o.subtotal) && !near(sumLines, o.subtotal)) {\n  errors.push(`data.order.subtotal: ${money(o.subtotal)} no coincide con la suma de las líneas (${money(sumLines)})`);\n}\nif ([o.subtotal, o.discount, o.shipping, o.total].every(isNum)) {\n  const expected = Math.round((o.subtotal - o.discount + o.shipping) * 100) / 100;\n  if (!near(expected, o.total) || o.total <= 0) {\n    errors.push(`data.order.total: ${money(o.total)} no coincide con subtotal − discount + shipping (${money(expected)})`);\n  }\n}\n\n// Bloques propios de cada tipo\nif (ev.type === 'payment.simulated') {\n  const pay = d.payment || {};\n  if (pay.method !== 'redsys') errors.push('data.payment.method: solo redsys');\n  if (!['approved', 'declined'].includes(pay.status)) errors.push('data.payment.status: approved o declined');\n  if (pay.status === 'approved' && !(isNum(pay.amount) && isNum(o.total) && near(pay.amount, o.total))) {\n    errors.push('data.payment.amount: con approved debe ser igual a order.total');\n  }\n}\nif (ev.type === 'order.status_changed') {\n  const ch = d.change || {};\n  if (ch.status !== o.status) errors.push('data.change.status: debe coincidir con data.order.status');\n  if (ch.origin !== 'backoffice') errors.push('data.change.origin: solo se integran los cambios del panel de la tienda');\n}\n\nreturn [{ json: { valid: errors.length === 0, errors, event: ev } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2160,
+        -704
+      ],
+      "id": "3f8ad2a5-5d18-44ee-9e51-0413f0d2edde",
+      "name": "Validar"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "22bd754c-b735-42b1-90f6-944678389f2b",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        -1936,
+        -704
+      ],
+      "id": "cd2df2ef-52a9-4814-8ba4-efa0b607205d",
+      "name": "If1"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"result\": \"invalid\", \"event_id\": $json.event.event_id, \"errors\": $json.errors } }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -1712,
+        -544
+      ],
+      "id": "a66d8b8a-c754-484f-87e8-d5f01e4fa838",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ERP_API_URL }}/webhooks/orders",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Integration-Token",
+              "value": "={{ $env.ERP_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -1408,
+        -720
+      ],
+      "id": "d4ad1c35-ec00-46bf-b484-06e202324db1",
+      "name": "Back-office: pedido",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 3,
+        "output": "={{ $json.statusCode === 200 ? 0 : ($json.statusCode === 422 && $json.body?.error_code !== 'ERR_DB_TRANSACTION') ? 1 : 2 }}\n"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.5,
+      "position": [
+        -1184,
+        -720
+      ],
+      "id": "ad392717-2fa6-4acd-8d15-bfbd9d0e0831",
+      "name": "Respuesta del backoffice"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ result: 'rejected', event_id: $('Transformar').first().json.event_id, error_code: $json.body.error_code, details: $json.body }) ",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -960,
+        -688
+      ],
+      "id": "12623192-23b7-4858-94e8-fc6b40296add",
+      "name": "422 - Rechazado"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ result: 'error', event_id: $('Transformar').first().json.event_id, message: 'Back-office no disponible: la tienda lo reintentará' }) ",
+        "options": {
+          "responseCode": 503
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -960,
+        -544
+      ],
+      "id": "485bcdf4-44c0-4a49-bc42-b5d2e64e8142",
+      "name": "503 - BO no disponible",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ result: $json.body.result, event_id: $('Transformar').first().json.event_id, message: $json.body.message ?? null }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -960,
+        -832
+      ],
+      "id": "ea5403b9-14e3-4f93-9591-7f26d228ef03",
+      "name": "200 - OK"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tienda → formato de POST /api/v1/webhooks/orders del back-office (contrato, apartado 9)\nconst ev = $input.first().json.event;\nconst d = ev.data;\nconst o = d.order;\nconst a = d.shipping_address;\n\nconst payload = {\n  event_id: ev.event_id,                       // idempotencia del back-office («duplicate»)\n  execution_id: 'n8n_' + $execution.id,        // trazabilidad: ejecución de n8n en el log del back-office\n  event_type: ev.type,\n  occurred_at: ev.occurred_at,\n  order_ref: o.reference,\n  status: o.status,                            // tal cual: el back-office acepta los estados de la tienda\n  payment_method: 'redsys_sandbox',\n  shipping_address: `${a.address}, ${a.postal_code} ${a.city} (${a.country})`,\n  customer: { name: d.customer.name, email: d.customer.email },\n  items: d.lines.map(l => ({\n    sku: l.product_code,                       // el product_code de la tienda es el sku del almacén\n    product_name: l.name,\n    variant_size: l.size,\n    quantity: l.quantity,\n    unit_price: l.unit_price,\n  })),\n  discount_code: o.discount_code,\n  discount_amount: o.discount,\n  shipping_amount: o.shipping,\n  total_amount: o.total,\n};\n\nreturn [{ json: { event_id: ev.event_id, payload } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1712,
+        -720
+      ],
+      "id": "68552341-6b80-4351-93cf-fc907d0f6746",
+      "name": "Transformar"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Entrada webhook": {
+      "main": [
+        [
+          {
+            "node": "Verificamos firma",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificamos firma": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Firma incorrecta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Firma incorrecta": {
+      "main": [
+        []
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Validar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "503",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "400",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar": {
+      "main": [
+        [
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "Transformar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Back-office: pedido": {
+      "main": [
+        [
+          {
+            "node": "Respuesta del backoffice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respuesta del backoffice": {
+      "main": [
+        [
+          {
+            "node": "200 - OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "422 - Rechazado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "503 - BO no disponible",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transformar": {
+      "main": [
+        [
+          {
+            "node": "Back-office: pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "bd5f8509-1726-4194-b9a9-96001193b336",
+  "meta": {
+    "instanceId": "35adcd1f52ceb99fb3ea98dded8a7f68574684a7f8accd9c2933c5af3828c7ce"
+  },
+  "nodeGroups": [],
+  "id": "lqve6l5RypkYglG3",
+  "tags": []
+}
