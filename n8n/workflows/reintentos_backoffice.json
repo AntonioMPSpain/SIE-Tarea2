@@ -1,0 +1,77 @@
+{
+  "name": "Piquantum - Reintentos del back-office",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -672,
+        -448
+      ],
+      "id": "bc26b1e7-f7df-485f-a227-dd74f96c881c",
+      "name": "Cada 5 minutos"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ERP_API_URL }}/internal/webhooks/retry",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Integration-Token",
+              "value": "={{ $env.ERP_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -416,
+        -448
+      ],
+      "id": "52e3254b-7c9a-45d2-a804-b37485ad0284",
+      "name": "Back-office: reintentar avisos",
+      "notes": "Reenvía a n8n los avisos del back-office que siguen PENDIENTE (contrato del back-office, apartado 3.3). Si el back-office no responde, la ejecución falla y queda en Executions como error."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cada 5 minutos": {
+      "main": [
+        [
+          {
+            "node": "Back-office: reintentar avisos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "c57d0bf2-9343-474b-8a07-5de7970b034d",
+  "meta": {
+    "instanceId": "35adcd1f52ceb99fb3ea98dded8a7f68574684a7f8accd9c2933c5af3828c7ce"
+  },
+  "nodeGroups": [],
+  "id": "PbESxqdUjDWhYCWF",
+  "tags": []
+}
