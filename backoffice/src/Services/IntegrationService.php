@@ -1721,6 +1721,223 @@ class IntegrationService
         };
     }
 
+    // =========================================================================
+    // CONSULTAS FILTRADAS Y EXPORTACIÓN DE EVIDENCIAS (CSV / JSON)
+    // =========================================================================
+
+    /**
+     * Devuelve los pedidos integrados aplicando filtros opcionales por estado, prioridad o texto libre.
+     */
+    public function getFilteredOrders(?string $status = null, ?string $priority = null, ?string $search = null): array
+    {
+        $where = [];
+        $params = [];
+
+        $status = $this->stringOrNull($status);
+        if ($status !== null) {
+            $where[] = 'order_status = :status';
+            $params[':status'] = $status;
+        }
+
+        $priority = $this->stringOrNull($priority);
+        if ($priority !== null) {
+            $where[] = 'priority = :priority';
+            $params[':priority'] = strtoupper($priority);
+        }
+
+        $search = $this->stringOrNull($search);
+        if ($search !== null) {
+            $where[] = '(order_ref LIKE :q OR customer_name LIKE :q OR customer_email LIKE :q)';
+            $params[':q'] = '%' . $search . '%';
+        }
+
+        $sql = 'SELECT * FROM erp_orders';
+        if (!empty($where)) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= ' ORDER BY id DESC';
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Devuelve el historial de logs de trazabilidad aplicando filtros opcionales por estado, escenario o entidad.
+     */
+    public function getFilteredLogs(?string $status = null, ?string $scenario = null, ?string $search = null, int $limit = 100): array
+    {
+        $where = [];
+        $params = [];
+
+        $status = $this->stringOrNull($status);
+        if ($status !== null) {
+            $where[] = 'status = :status';
+            $params[':status'] = strtoupper($status);
+        }
+
+        $scenario = $this->stringOrNull($scenario);
+        if ($scenario !== null) {
+            $where[] = 'scenario = :scenario';
+            $params[':scenario'] = $scenario;
+        }
+
+        $search = $this->stringOrNull($search);
+        if ($search !== null) {
+            $where[] = '(execution_id LIKE :q OR entity_ref LIKE :q OR event_type LIKE :q OR error_type LIKE :q OR validation_summary LIKE :q)';
+            $params[':q'] = '%' . $search . '%';
+        }
+
+        $safeLimit = max(1, min(500, $limit));
+        $sql = 'SELECT * FROM erp_integration_logs';
+        if (!empty($where)) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= " ORDER BY id DESC LIMIT {$safeLimit}";
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Devuelve las fichas de clientes sincronizados junto con el recuento de incidencias asociadas.
+     */
+    public function getCustomersWithTicketCounts(?string $segment = null, ?string $search = null): array
+    {
+        $where = [];
+        $params = [];
+
+        $segment = $this->stringOrNull($segment);
+        if ($segment !== null) {
+            $where[] = 'c.segment = :segment';
+            $params[':segment'] = strtoupper($segment);
+        }
+
+        $search = $this->stringOrNull($search);
+        if ($search !== null) {
+            $where[] = '(c.name LIKE :q OR c.email LIKE :q OR c.shipping_address LIKE :q)';
+            $params[':q'] = '%' . $search . '%';
+        }
+
+        $sql = '
+            SELECT c.*,
+                   (SELECT COUNT(*) FROM erp_tickets t WHERE LOWER(t.customer_email) = LOWER(c.email)) AS tickets_count,
+                   (SELECT MAX(o.channel_created_at) FROM erp_orders o WHERE o.customer_id = c.id) AS last_order_at
+            FROM erp_customers c
+        ';
+        if (!empty($where)) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= ' ORDER BY c.total_spent DESC, c.id DESC';
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Genera el contenido CSV (UTF-8 con BOM y separador ';') de los logs de integración.
+     */
+    public function exportLogsToCsv(?string $status = null, ?string $scenario = null): string
+    {
+        $rows = $this->getFilteredLogs($status, $scenario, null, 500);
+        $fh = fopen('php://temp', 'r+');
+        fwrite($fh, "\xEF\xBB\xBF"); // UTF-8 BOM para Excel
+
+        fputcsv($fh, [
+            'id',
+            'execution_id',
+            'scenario',
+            'event_type',
+            'direction',
+            'entity_ref',
+            'status',
+            'error_type',
+            'validation_summary',
+            'execution_ms',
+            'created_at',
+        ], ';');
+
+        foreach ($rows as $r) {
+            fputcsv($fh, [
+                $r['id'],
+                $r['execution_id'],
+                $r['scenario'],
+                $r['event_type'],
+                $r['direction'],
+                $r['entity_ref'],
+                $r['status'],
+                $r['error_type'] ?? '',
+                $r['validation_summary'],
+                $r['execution_ms'],
+                $r['created_at'],
+            ], ';');
+        }
+
+        rewind($fh);
+        $csv = (string) stream_get_contents($fh);
+        fclose($fh);
+        return $csv;
+    }
+
+    /**
+     * Genera el contenido CSV (UTF-8 con BOM y separador ';') de las propuestas del Agente IA y su supervisión humana.
+     */
+    public function exportAuditsToCsv(): string
+    {
+        $rows = $this->db->query('SELECT * FROM erp_ai_audits ORDER BY id DESC')->fetchAll();
+        $fh = fopen('php://temp', 'r+');
+        fwrite($fh, "\xEF\xBB\xBF");
+
+        fputcsv($fh, [
+            'audit_id',
+            'ticket_ref',
+            'order_ref',
+            'agent_model',
+            'tools_invoked',
+            'a_tipo_caso_detectado',
+            'b_datos_consultados',
+            'c_accion_propuesta',
+            'd_justificacion_breve',
+            'e_nivel_confianza_o_prioridad',
+            'f_riesgos_o_advertencias',
+            'g_estado_final',
+            'reviewed_by',
+            'review_comment',
+            'reviewed_at',
+            'telegram_notified',
+            'created_at',
+        ], ';');
+
+        foreach ($rows as $r) {
+            fputcsv($fh, [
+                $r['id'],
+                $r['ticket_ref'],
+                $r['order_ref'] ?? '',
+                $r['agent_model'] ?? '',
+                $r['tools_invoked'],
+                $r['detected_case_type'],
+                preg_replace('/\s+/', ' ', (string) $r['consulted_data_json']),
+                $r['proposed_action'],
+                $r['justification'],
+                $r['confidence_and_priority'],
+                $r['risks_and_warnings'],
+                $r['final_status'],
+                $r['reviewed_by'] ?? '',
+                $r['review_comment'] ?? '',
+                $r['reviewed_at'] ?? '',
+                $r['telegram_notified'],
+                $r['created_at'],
+            ], ';');
+        }
+
+        rewind($fh);
+        $csv = (string) stream_get_contents($fh);
+        fclose($fh);
+        return $csv;
+    }
+
     private function logExecution(
         string $executionId,
         string $scenario,
