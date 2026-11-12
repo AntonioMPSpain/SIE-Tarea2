@@ -66,6 +66,7 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     'dashboard'     => ['📊 Cuadro de Mando (Métricas)', null],
                     'orders'        => ['📦 Pedidos (Esc. 1 y 2)', count($orders)],
                     'inventory'     => ['🏭 Almacén y Stock (Esc. 2)', count($inventory)],
+                    'customers'     => ['👥 Clientes (CRM)', count($customers)],
                     'ai_governance' => ['🤖 Postventa + Agente IA (Esc. 3)', $pendingAuditsCount > 0 ? "{$pendingAuditsCount} pend." : null],
                     'logs'          => ['🛡️ Trazabilidad y Logs', count($logs)],
                     'simulator'     => ['🧪 Simulador / API Contracts', null],
@@ -128,9 +129,15 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     <h2 class="text-lg font-bold text-white">Cuadro de Mando Operativo en Tiempo Real (Apartado 7)</h2>
                     <p class="text-xs text-slate-400">Indicadores calculados dinámicamente desde las tablas operativas del Back-Office, logs de n8n y auditorías del Agente de IA (0% CSV estáticos).</p>
                 </div>
-                <a href="/api/v1/metrics" target="_blank" class="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sky-300 font-mono self-start">
-                    🔗 Ver JSON en vivo: GET /api/v1/metrics
-                </a>
+
+                <div class="flex flex-wrap items-center gap-2 self-start">
+                    <a href="/?export=metrics_json" class="text-xs px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-medium transition">
+                        📥 Exportar Métricas (JSON)
+                    </a>
+                    <a href="/?export=logs_csv" class="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sky-300 font-medium transition">
+                        📥 Exportar Trazabilidad (CSV)
+                    </a>
+                </div>
             </div>
 
             <!-- 8 TARJETAS DE MÉTRICAS (El enunciado exige mínimo 5) -->
@@ -392,6 +399,38 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 </span>
             </div>
 
+            <!-- Buscador y Filtro de Pedidos -->
+            <form method="GET" action="/" class="card-glass rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+                <input type="hidden" name="tab" value="orders">
+                <div class="flex flex-wrap items-center gap-2 flex-1">
+                    <input type="text" name="q" value="<?= htmlspecialchars((string) ($searchFilter ?? '')) ?>"
+                           placeholder="🔎 Buscar por referencia (PQ-...), cliente o email..."
+                           class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white w-full sm:w-72">
+                    <select name="order_status" class="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        <option value="">Todos los estados</option>
+                        <?php foreach (['pendiente_preparacion', 'en_preparacion', 'enviado', 'entregado', 'incidencia', 'cancelado'] as $stOpt): ?>
+                            <option value="<?= $stOpt ?>" <?= ($orderStatusFilter ?? '') === $stOpt ? 'selected' : '' ?>>Estado: <?= $stOpt ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="order_priority" class="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        <option value="">Todas las prioridades</option>
+                        <?php foreach (['NORMAL', 'ALTA', 'URGENTE'] as $prOpt): ?>
+                            <option value="<?= $prOpt ?>" <?= ($orderPriorityFilter ?? '') === $prOpt ? 'selected' : '' ?>>Prioridad: <?= $prOpt ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="submit" class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition">
+                        Filtrar pedidos
+                    </button>
+                    <?php if (!empty($searchFilter) || !empty($orderStatusFilter) || !empty($orderPriorityFilter)): ?>
+                        <a href="/?tab=orders" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">
+                            Limpiar
+                        </a>
+                    <?php endif; ?>
+                </div>
+            </form>
+
             <?php if (empty($orders)): ?>
                 <div class="card-glass rounded-xl p-10 text-center space-y-3">
                     <div class="text-4xl">📭</div>
@@ -506,6 +545,22 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 </div>
             </div>
 
+                <?php
+                $lowStockItems = array_filter($inventory, static fn($i) => ((int) $i['stock_available']) <= ((int) $i['min_stock_threshold']));
+                if (!empty($lowStockItems)):
+                ?>
+                    <div class="p-4 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <strong>⚠️ Alerta de Reposición de Almacén:</strong> Hay <?= count($lowStockItems) ?> referencia(s) en nivel crítico o bajo umbral de seguridad:
+                            <?php foreach ($lowStockItems as $ls): ?>
+                                <span class="inline-block ml-1.5 px-2 py-0.5 rounded bg-amber-500/20 font-mono font-bold text-amber-300">
+                                    <?= htmlspecialchars($ls['sku']) ?> (<?= (int) $ls['stock_available'] ?>/<?= (int) $ls['min_stock_threshold'] ?> uds)
+                                </span>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
             <div class="card-glass rounded-xl overflow-hidden">
                 <div class="overflow-x-auto">
                     <table class="w-full text-xs text-left">
@@ -559,6 +614,99 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                 </div>
             </div>
 
+        <?php elseif ($tab === 'customers'): ?>
+            <!-- =========================================================================
+                 PESTAÑA 3B: FICHA DE CLIENTES SINCRONIZADOS (CRM / erp_customers)
+                 ========================================================================= -->
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-800 pb-4">
+                <div>
+                    <h2 class="text-lg font-bold text-white">Directorio de Clientes Sincronizados y Segmentación CRM (`erp_customers`)</h2>
+                    <p class="text-xs text-slate-400">Clientes creados o actualizados automáticamente al integrar pedidos (Escenario 1). El Agente de IA consulta el segmento (<code class="text-amber-300">VIP_PICANTE</code> / <code class="text-sky-300">ESTANDAR</code>) y el historial de incidencias para priorizar casos postventa.</p>
+                </div>
+            </div>
+
+            <!-- Buscador y Filtro de Clientes -->
+            <form method="GET" action="/" class="card-glass rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+                <input type="hidden" name="tab" value="customers">
+                <div class="flex flex-wrap items-center gap-2 flex-1">
+                    <input type="text" name="q" value="<?= htmlspecialchars((string) ($searchFilter ?? '')) ?>"
+                           placeholder="🔎 Buscar cliente por nombre, email o ID externo..."
+                           class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white w-full sm:w-72">
+                    <select name="customer_segment" class="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        <option value="">Todos los segmentos</option>
+                        <option value="VIP_PICANTE" <?= ($customerSegFilter ?? '') === 'VIP_PICANTE' ? 'selected' : '' ?>>Segmento: VIP_PICANTE (≥ 60 €)</option>
+                        <option value="ESTANDAR" <?= ($customerSegFilter ?? '') === 'ESTANDAR' ? 'selected' : '' ?>>Segmento: ESTANDAR</option>
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="submit" class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition">
+                        Filtrar clientes
+                    </button>
+                    <?php if (!empty($searchFilter) || !empty($customerSegFilter)): ?>
+                        <a href="/?tab=customers" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">
+                            Limpiar
+                        </a>
+                    <?php endif; ?>
+                </div>
+            </form>
+
+            <?php if (empty($customers)): ?>
+                <div class="card-glass rounded-xl p-10 text-center space-y-2">
+                    <div class="text-4xl">👥</div>
+                    <h3 class="text-base font-bold text-white">Sin clientes sincronizados con los criterios actuales</h3>
+                    <p class="text-xs text-slate-400">Cuando n8n integra pedidos desde Piquantum, la ficha del cliente se crea o actualiza automáticamente en el Back-Office.</p>
+                </div>
+            <?php else: ?>
+                <div class="card-glass rounded-xl overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs text-left">
+                            <thead class="bg-slate-900/90 text-slate-400 uppercase border-b border-slate-800">
+                                <tr>
+                                    <th class="p-3">ID Externo</th>
+                                    <th class="p-3">Cliente</th>
+                                    <th class="p-3">Contacto / Dirección</th>
+                                    <th class="p-3 text-center">Segmento CRM</th>
+                                    <th class="p-3 text-center">Pedidos</th>
+                                    <th class="p-3 text-right">Gasto Acumulado</th>
+                                    <th class="p-3 text-center">Incidencias</th>
+                                    <th class="p-3 text-right">Último Pedido</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-800">
+                                <?php foreach ($customers as $cust):
+                                    $isVip = ($cust['segment'] === 'VIP_PICANTE');
+                                ?>
+                                    <tr class="hover:bg-slate-800/40">
+                                        <td class="p-3 font-mono text-amber-300"><?= htmlspecialchars((string) $cust['external_customer_id']) ?></td>
+                                        <td class="p-3">
+                                            <div class="font-bold text-white"><?= htmlspecialchars((string) $cust['full_name']) ?></div>
+                                            <div class="font-mono text-slate-400 text-[11px]"><?= htmlspecialchars((string) $cust['email']) ?></div>
+                                        </td>
+                                        <td class="p-3 text-slate-300">
+                                            <div><?= htmlspecialchars((string) ($cust['phone'] ?: '—')) ?></div>
+                                            <div class="text-[11px] text-slate-400"><?= htmlspecialchars((string) ($cust['address_summary'] ?: '—')) ?></div>
+                                        </td>
+                                        <td class="p-3 text-center">
+                                            <span class="px-2.5 py-0.5 rounded-full font-mono font-bold text-[11px] <?= $isVip ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' : 'bg-slate-800 text-slate-300' ?>">
+                                                <?= $isVip ? '🔥 VIP_PICANTE' : 'ESTANDAR' ?>
+                                            </span>
+                                        </td>
+                                        <td class="p-3 text-center font-mono font-bold text-white"><?= (int) $cust['orders_count'] ?></td>
+                                        <td class="p-3 text-right font-mono font-bold text-emerald-400"><?= number_format((float) $cust['total_spent'], 2, ',', '.') ?> €</td>
+                                        <td class="p-3 text-center">
+                                            <span class="px-2 py-0.5 rounded font-mono <?= ((int) ($cust['tickets_count'] ?? 0)) > 0 ? 'bg-amber-500/20 text-amber-300' : 'text-slate-500' ?>">
+                                                <?= (int) ($cust['tickets_count'] ?? 0) ?>
+                                            </span>
+                                        </td>
+                                        <td class="p-3 text-right font-mono text-slate-400"><?= htmlspecialchars((string) ($cust['last_order_at'] ?? '—')) ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
+
         <?php elseif ($tab === 'ai_governance'): ?>
             <!-- =========================================================================
                  PESTAÑA 4: ESCENARIO 3 + AGENTE DE IA SUPERVISADO Y REVISIÓN HUMANA (APARTADO 6)
@@ -568,6 +716,9 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     <h2 class="text-lg font-bold text-white">Incidencias Postventa, Salida Estructurada del Agente IA y Supervisión Humana (Apartados 5 y 6)</h2>
                     <p class="text-xs text-slate-400">El Agente de IA consulta herramientas operativas, genera los <strong>7 campos obligatorios de salida estructurada</strong> y queda bloqueado en <code class="text-amber-300">pendiente_de_revision</code> hasta que un humano aprueba o rechaza el envío por Telegram.</p>
                 </div>
+                <a href="/?export=audits_csv" class="text-xs px-3 py-1.5 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 font-medium self-start transition">
+                    📥 Exportar Auditoría IA (CSV)
+                </a>
             </div>
 
             <?php if (empty($audits)): ?>
@@ -701,7 +852,49 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                     <h2 class="text-lg font-bold text-white">Registro de Trazabilidad y Auditoría de Ejecuciones (Apartado 3.e y 3.f)</h2>
                     <p class="text-xs text-slate-400">Cada intercambio entre Piquantum, n8n, el Back-Office y el Agente de IA queda registrado con su ID de ejecución, payload recibido, validación y resultado (<code class="text-emerald-400">SUCCESS</code> / <code class="text-rose-400">ERROR</code>).</p>
                 </div>
+                <div class="flex flex-wrap items-center gap-2 self-start">
+                    <a href="/?export=logs_csv&amp;log_status=<?= urlencode((string) ($logStatusFilter ?? '')) ?>&amp;log_scenario=<?= urlencode((string) ($logScenarioFilter ?? '')) ?>"
+                       class="text-xs px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-medium transition">
+                        📥 Exportar Logs (CSV)
+                    </a>
+                    <a href="/?export=logs_json&amp;log_status=<?= urlencode((string) ($logStatusFilter ?? '')) ?>&amp;log_scenario=<?= urlencode((string) ($logScenarioFilter ?? '')) ?>&amp;q=<?= urlencode((string) ($searchFilter ?? '')) ?>"
+                       class="text-xs px-3 py-1.5 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 text-sky-300 font-medium transition">
+                        📥 Exportar Logs (JSON)
+                    </a>
+                </div>
             </div>
+
+            <!-- Buscador y Filtro de Logs de Trazabilidad -->
+            <form method="GET" action="/" class="card-glass rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+                <input type="hidden" name="tab" value="logs">
+                <div class="flex flex-wrap items-center gap-2 flex-1">
+                    <input type="text" name="q" value="<?= htmlspecialchars((string) ($searchFilter ?? '')) ?>"
+                           placeholder="🔎 Buscar por ID de ejecución, evento, tipo de error o contenido..."
+                           class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white w-full sm:w-80">
+                    <select name="log_status" class="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        <option value="">Todos los resultados</option>
+                        <?php foreach (['SUCCESS', 'ERROR', 'DUPLICADO'] as $lSt): ?>
+                            <option value="<?= $lSt ?>" <?= ($logStatusFilter ?? '') === $lSt ? 'selected' : '' ?>>Resultado: <?= $lSt ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="log_scenario" class="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        <option value="">Todos los escenarios</option>
+                        <?php foreach (['ESCENARIO_1', 'ESCENARIO_2', 'ESCENARIO_3', 'AGENTE_IA', 'SISTEMA'] as $lSc): ?>
+                            <option value="<?= $lSc ?>" <?= ($logScenarioFilter ?? '') === $lSc ? 'selected' : '' ?>>Escenario: <?= $lSc ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="submit" class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition">
+                        Filtrar logs
+                    </button>
+                    <?php if (!empty($searchFilter) || !empty($logStatusFilter) || !empty($logScenarioFilter)): ?>
+                        <a href="/?tab=logs" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">
+                            Limpiar
+                        </a>
+                    <?php endif; ?>
+                </div>
+            </form>
 
             <div class="space-y-3">
                 <?php foreach ($logs as $log):
