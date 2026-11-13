@@ -1816,7 +1816,7 @@ class IntegrationService
 
         $search = $this->stringOrNull($search);
         if ($search !== null) {
-            $where[] = '(c.name LIKE :q OR c.email LIKE :q OR c.shipping_address LIKE :q)';
+            $where[] = '(c.name LIKE :q OR c.email LIKE :q OR c.shipping_address LIKE :q OR COALESCE(c.external_customer_id, \'\') LIKE :q)';
             $params[':q'] = '%' . $search . '%';
         }
 

@@ -321,7 +321,7 @@ $filteredSearch = $service->getFilteredOrders(null, null, 'PQ-20261108-A901BC');
 check(count($filteredSearch) === 1 && $filteredSearch[0]['order_ref'] === 'PQ-20261108-A901BC', 'C16: buscador de pedidos por referencia única');
 
 $customersWithTickets = $service->getCustomersWithTicketCounts(null, 'laura@example.com');
-check(count($customersWithTickets) === 1 && (int) $customersWithTickets[0]['tickets_count'] >= 1, 'C16: ficha de clientes sincronizados (erp_customers) incluye recuento de incidencias postventa');
+check(count($customersWithTickets) === 1 && (int) $customersWithTickets[0]['tickets_count'] >= 1 && isset($customersWithTickets[0]['name'], $customersWithTickets[0]['shipping_address']), 'C16: ficha de clientes sincronizados (erp_customers) incluye nombre, dirección y recuento de incidencias postventa');
 
 $errorLogs = $service->getFilteredLogs('ERROR', null, null, 100);
 check(count($errorLogs) >= 5 && $errorLogs[0]['status'] === 'ERROR', 'C16: filtro de logs de trazabilidad por resultado ERROR');

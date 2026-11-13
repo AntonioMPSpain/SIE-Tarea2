@@ -677,14 +677,14 @@ $failedLogsCount    = (int) ($metrics['integration']['failed_events'] ?? 0);
                                     $isVip = ($cust['segment'] === 'VIP_PICANTE');
                                 ?>
                                     <tr class="hover:bg-slate-800/40">
-                                        <td class="p-3 font-mono text-amber-300"><?= htmlspecialchars((string) $cust['external_customer_id']) ?></td>
+                                        <td class="p-3 font-mono text-amber-300"><?= htmlspecialchars((string) (($cust['external_customer_id'] ?? '') !== '' ? $cust['external_customer_id'] : '—')) ?></td>
                                         <td class="p-3">
-                                            <div class="font-bold text-white"><?= htmlspecialchars((string) $cust['full_name']) ?></div>
+                                            <div class="font-bold text-white"><?= htmlspecialchars((string) ($cust['name'] ?? '—')) ?></div>
                                             <div class="font-mono text-slate-400 text-[11px]"><?= htmlspecialchars((string) $cust['email']) ?></div>
                                         </td>
                                         <td class="p-3 text-slate-300">
                                             <div><?= htmlspecialchars((string) ($cust['phone'] ?: '—')) ?></div>
-                                            <div class="text-[11px] text-slate-400"><?= htmlspecialchars((string) ($cust['address_summary'] ?: '—')) ?></div>
+                                            <div class="text-[11px] text-slate-400"><?= htmlspecialchars((string) (($cust['shipping_address'] ?? '') !== '' ? $cust['shipping_address'] : '—')) ?></div>
                                         </td>
                                         <td class="p-3 text-center">
                                             <span class="px-2.5 py-0.5 rounded-full font-mono font-bold text-[11px] <?= $isVip ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' : 'bg-slate-800 text-slate-300' ?>">
