@@ -14,6 +14,9 @@
 | [`backoffice/`](backoffice/) | **Sistema Independiente de Back-Office (ERP/CRM + Gobernanza IA + Cuadro de Mando Operativo)** con su propia base de datos aislada y API REST (`/api/v1/*`). |
 | [`payloads/`](payloads/) | **Payloads JSON oficiales de prueba** para los Escenarios 1, 2, 3, Rama de Error y Salida Estructurada del Agente IA (Apartado 9.g). |
 | [`docs/GUIA_COMPAÑEROS_INTEGRACION.md`](docs/GUIA_COMPAÑEROS_INTEGRACION.md) | Guía paso a paso para conectar `n8n` (en la VM de Google Cloud) y el Bot de Telegram con el Back-Office. |
+| [`docs/INTEGRACION_ESCENARIO3.md`](docs/INTEGRACION_ESCENARIO3.md) | Escenario 3 (agente de IA + Telegram): arquitectura y pasos de puesta en marcha. |
+| [`docs/MATRIZ_DECISION_IMPLANTACION.md`](docs/MATRIZ_DECISION_IMPLANTACION.md) | Matriz de decisión de implantación (apartado 8). |
+| [`n8n/workflows/`](n8n/workflows/) | Workflows exportados de n8n (escenarios 1, 2 y 3, reintentos y sincronización inicial). |
 | [`docs/CONTRATOS_API_Y_AGENTE.md`](docs/CONTRATOS_API_Y_AGENTE.md) | Especificación de contratos de integración, validaciones, códigos de error y justificación de métricas operativas. |
 
 ---
