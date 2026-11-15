@@ -73,6 +73,10 @@ services:
       PIQUANTUM_WEBHOOK_SECRET: ${PIQUANTUM_WEBHOOK_SECRET:-}
       PIQUANTUM_SYNC_URL: ${PIQUANTUM_SYNC_URL:-https://www.piquantum.onl/api/integration/sync}
       PIQUANTUM_SYNC_TOKEN: ${PIQUANTUM_SYNC_TOKEN:-}
+      # Escenario 3 (Telegram): chat de los supervisores y chat de prueba del cliente.
+      # El bot solo puede escribir a un chat_id numérico de alguien que le haya escrito antes.
+      SUPERVISOR_TELEGRAM_CHAT_ID: ${SUPERVISOR_TELEGRAM_CHAT_ID:-}
+      DEMO_CUSTOMER_TELEGRAM_CHAT_ID: ${DEMO_CUSTOMER_TELEGRAM_CHAT_ID:-}
     volumes:
       - n8n_data:/home/node/.n8n              # usuarios, flujos, credenciales e historial
     logging: *logging
