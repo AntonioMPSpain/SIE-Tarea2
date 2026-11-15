@@ -20,23 +20,6 @@
     },
     {
       "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ { \"result\": \"error\", \"event_id\": $json.event.event_id, \"message\": \"Flujo de incidencias pendiente (escenario 3): la tienda lo reintentará\" } }}\n",
-        "options": {
-          "responseCode": 503
-        }
-      },
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.5,
-      "position": [
-        -2160,
-        -544
-      ],
-      "id": "6b6cdef7-c52a-4586-b098-a643a2cf6525",
-      "name": "503"
-    },
-    {
-      "parameters": {
         "httpMethod": "POST",
         "path": "piquantum/eventos",
         "responseMode": "responseNode",
@@ -312,6 +295,233 @@
       ],
       "id": "68552341-6b80-4351-93cf-fc907d0f6746",
       "name": "Transformar"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validación de support.requested (contrato, apartados 4 y 6.4). Devuelve la lista de errores.\nconst ev = $input.first().json.event;\nconst d = ev.data || {};\nconst t = d.ticket || {};\nconst c = d.contact || {};\nconst errors = [];\nconst filled = v => typeof v === 'string' && v.trim() !== '';\n\nif (!filled(ev.event_id)) errors.push('event_id: obligatorio');\nif (!filled(ev.occurred_at) || isNaN(Date.parse(ev.occurred_at))) errors.push('occurred_at: fecha ISO 8601 obligatoria');\nif (ev.source !== 'piquantum-web') errors.push('source: debe ser piquantum-web');\n\nif (!Number.isInteger(t.id) || t.id <= 0) errors.push('data.ticket.id: entero > 0');\nif (!filled(t.subject) || t.subject.length > 150) errors.push('data.ticket.subject: 1-150 caracteres');\nif (!filled(t.message) || t.message.trim().length < 10 || t.message.length > 2000) errors.push('data.ticket.message: 10-2000 caracteres');\nif (t.status !== 'abierta') errors.push('data.ticket.status: debe ser abierta');\nif (!filled(c.name)) errors.push('data.contact.name: obligatorio');\nif (!filled(c.email)) errors.push('data.contact.email: obligatorio');\nelse if (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(c.email)) errors.push('data.contact.email: formato no válido');\nif (!(d.customer_id === null || Number.isInteger(d.customer_id))) errors.push('data.customer_id: entero o null');\nif (!(d.order_reference === null || /^PQ-\\d{8}-[A-Z0-9]{6}$/.test(d.order_reference || ''))) {\n  errors.push('data.order_reference: null o formato PQ-AAAAMMDD-XXXXXX');\n}\nreturn [{ json: { valid: errors.length === 0, errors, event: ev } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2160,
+        -1300
+      ],
+      "id": "68fca208-9db4-5fce-b73e-f91b20d126db",
+      "name": "Validar incidencia"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "14c73518-f5e7-5ec6-b5db-9ec03343c6c0",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        -1936,
+        -1300
+      ],
+      "id": "bb577e3b-bf3a-51a1-8c42-3b396733ffc5",
+      "name": "¿Incidencia válida?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tienda → formato de POST /api/v1/webhooks/tickets del back-office (contrato, apartado 9)\nconst ev = $input.first().json.event;\nconst d = ev.data;\n// telegram_chat_id (decisión 12.B, opción 3): la tienda no lo guarda, así que en la demo\n// usamos un chat de prueba fijo en una variable de n8n. Si no está definida, no se envía.\nconst chat = ($env.DEMO_CUSTOMER_TELEGRAM_CHAT_ID || '').trim();\n\nconst payload = {\n  event_id: ev.event_id,\n  execution_id: 'n8n_' + $execution.id,\n  ticket_ref: 'PQ-TCK-' + d.ticket.id,\n  order_ref: d.order_reference,\n  customer_name: d.contact.name,\n  customer_email: d.contact.email,\n  subject: d.ticket.subject,\n  description: d.ticket.message,\n};\nif (/^-?\\d+$/.test(chat)) payload.telegram_chat_id = chat;\n\nreturn [{ json: { event_id: ev.event_id, payload } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1712,
+        -1400
+      ],
+      "id": "2a98f90d-765a-5bf9-b0c6-76aad0bc04d4",
+      "name": "Transformar ticket"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ERP_API_URL }}/webhooks/tickets",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Integration-Token",
+              "value": "={{ $env.ERP_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -1408,
+        -1400
+      ],
+      "id": "a82f6003-e77b-5cb3-ba2d-a4a7fd7cb669",
+      "name": "Back-office: ticket",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 3,
+        "output": "={{ $json.statusCode === 200 ? 0 : $json.statusCode === 422 ? 1 : 2 }}"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.5,
+      "position": [
+        -1184,
+        -1400
+      ],
+      "id": "aaf4ee7e-6f64-5aba-a8cf-02f84bfe18fc",
+      "name": "Respuesta del ticket"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ result: $json.body.result ?? 'created', event_id: $('Transformar ticket').first().json.event_id, ticket_ref: $('Transformar ticket').first().json.payload.ticket_ref, message: $json.body.message ?? null }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -960,
+        -1520
+      ],
+      "id": "b5f512d2-f304-594e-bc6c-a59352b14f40",
+      "name": "Ticket 200 - OK"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ result: 'rejected', event_id: $('Transformar ticket').first().json.event_id, error_code: $json.body.error_code, details: $json.body }) }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -960,
+        -1400
+      ],
+      "id": "c82624bc-3dee-528d-a44c-ea7055e046af",
+      "name": "Ticket 422 - Rechazado"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ result: 'error', event_id: $('Transformar ticket').first().json.event_id, message: 'Back-office no disponible: la tienda lo reintentará' }) }}",
+        "options": {
+          "responseCode": 503
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -960,
+        -1280
+      ],
+      "id": "d147750f-2cbf-5ec9-a978-157244bb0112",
+      "name": "Ticket 503 - BO no disponible"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "870da82d-f2a0-534e-b8a9-1683233daf47",
+              "leftValue": "={{ $('Back-office: ticket').first().json.body.result === 'created' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        -736,
+        -1520
+      ],
+      "id": "bd49c442-70f9-50c7-8140-6c4c6870f9b3",
+      "name": "¿Incidencia nueva?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/piquantum/agente-incidencia",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "={{ $env.ERP_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ticket_ref: $('Transformar ticket').first().json.payload.ticket_ref, order_ref: $('Transformar ticket').first().json.payload.order_ref, customer_name: $('Transformar ticket').first().json.payload.customer_name, subject: $('Transformar ticket').first().json.payload.subject, description: $('Transformar ticket').first().json.payload.description }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -512,
+        -1600
+      ],
+      "id": "84c137c4-2706-5825-8201-7537e2e57733",
+      "name": "Lanzar agente de postventa",
+      "onError": "continueRegularOutput",
+      "notes": "Llama al webhook interno del escenario 3. Ese webhook responde al instante (onReceived) y el agente sigue por su cuenta, así la tienda no espera a la IA. Si falla, la incidencia ya está en el back-office (estado EN_REVISION_IA) y un operador puede tratarla a mano."
     }
   ],
   "pinData": {},
@@ -372,7 +582,7 @@
         ],
         [
           {
-            "node": "503",
+            "node": "Validar incidencia",
             "type": "main",
             "index": 0
           }
@@ -460,6 +670,105 @@
             "index": 0
           }
         ]
+      ]
+    },
+    "Validar incidencia": {
+      "main": [
+        [
+          {
+            "node": "¿Incidencia válida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Incidencia válida?": {
+      "main": [
+        [
+          {
+            "node": "Transformar ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transformar ticket": {
+      "main": [
+        [
+          {
+            "node": "Back-office: ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Back-office: ticket": {
+      "main": [
+        [
+          {
+            "node": "Respuesta del ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respuesta del ticket": {
+      "main": [
+        [
+          {
+            "node": "Ticket 200 - OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ticket 422 - Rechazado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ticket 503 - BO no disponible",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ticket 200 - OK": {
+      "main": [
+        [
+          {
+            "node": "¿Incidencia nueva?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Incidencia nueva?": {
+      "main": [
+        [
+          {
+            "node": "Lanzar agente de postventa",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
       ]
     }
   },
